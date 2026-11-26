@@ -191,6 +191,23 @@ impl App {
             Err(e) => format!("(could not read this version: {})", e.message()),
         };
         ui.set_history_text(text.into());
+        let rows: Vec<DiffRow> = match sync::git::file_diff(&self.shared.notes_dir, id, &path) {
+            Ok(lines) => lines
+                .into_iter()
+                .map(|l| {
+                    use sync::git::DiffLine::*;
+                    let (kind, text) = match l {
+                        Context(t) => (0, t),
+                        Added(t) => (1, t),
+                        Removed(t) => (2, t),
+                        Gap => (3, String::new()),
+                    };
+                    DiffRow { kind, text: text.into() }
+                })
+                .collect(),
+            Err(e) => vec![DiffRow { kind: 3, text: format!("Could not compute changes: {}", e.message()).into() }],
+        };
+        ui.set_history_diff(ModelRc::new(VecModel::from(rows)));
     }
 
     fn restore_version(self: &Rc<Self>) {
@@ -215,6 +232,7 @@ impl App {
         ui.set_versions(ModelRc::default());
         ui.set_history_selected(SharedString::new());
         ui.set_history_text(SharedString::new());
+        ui.set_history_diff(ModelRc::default());
     }
 
     fn update_preview(&self) {

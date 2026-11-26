@@ -6,6 +6,12 @@ export struct NoteItem {
     subtitle: string,
 }
 
+// kind: 0 context, 1 added, 2 removed, 3 gap between hunks
+export struct DiffRow {
+    kind: int,
+    text: string,
+}
+
 export struct VersionItem {
     id: string,
     title: string,
@@ -242,6 +248,45 @@ component VersionList inherits ListView {
     }
 }
 
+component DiffView inherits Rectangle {
+    in property <[DiffRow]> rows;
+    background: Palette.background;
+    border-radius: 4px;
+    border-width: 1px;
+    border-color: Palette.foreground.with-alpha(0.12);
+    if root.rows.length == 0: Text {
+        text: "No changes to this note in this version";
+        color: Palette.foreground.with-alpha(0.5);
+    }
+    ListView {
+        for r in root.rows: Rectangle {
+            background: r.kind == 1 ? #22a55b30 : r.kind == 2 ? #d6454530 : transparent;
+            HorizontalLayout {
+                padding-left: 8px;
+                padding-right: 8px;
+                padding-top: r.kind == 3 ? 4px : 1px;
+                padding-bottom: r.kind == 3 ? 4px : 1px;
+                spacing: 8px;
+                Text {
+                    width: 12px;
+                    text: r.kind == 1 ? "+" : r.kind == 2 ? "−" : r.kind == 3 ? "⋯" : "";
+                    color: r.kind == 1 ? #22a55b : r.kind == 2 ? #d64545 : Palette.foreground.with-alpha(0.4);
+                    font-family: "monospace";
+                    font-size: 14px;
+                }
+                Text {
+                    horizontal-stretch: 1;
+                    text: r.text;
+                    wrap: word-wrap;
+                    color: r.kind == 0 ? Palette.foreground.with-alpha(0.6) : Palette.foreground;
+                    font-family: "monospace";
+                    font-size: 14px;
+                }
+            }
+        }
+    }
+}
+
 component VersionText inherits TextEdit {
     read-only: true;
     wrap: word-wrap;
@@ -253,6 +298,8 @@ component HistoryPane inherits VerticalLayout {
     in property <[VersionItem]> versions;
     in property <string> selected;
     in property <string> text;
+    in property <[DiffRow]> diff;
+    in-out property <bool> show-changes: true;
     callback select(string);
     callback restore();
     callback close();
@@ -263,7 +310,7 @@ component HistoryPane inherits VerticalLayout {
     HorizontalLayout {
         spacing: 8px;
         Text {
-            text: "History · \{root.versions.length} version(s)";
+            text: "History (\{root.versions.length})";
             font-size: 14px;
             font-weight: 600;
             vertical-alignment: center;
@@ -271,7 +318,11 @@ component HistoryPane inherits VerticalLayout {
             horizontal-stretch: 1;
         }
         Button {
-            text: "Restore this version";
+            text: root.show-changes ? "Full text" : "Changes";
+            clicked => { root.show-changes = !root.show-changes; }
+        }
+        Button {
+            text: "Restore";
             primary: true;
             enabled: root.selected != "";
             clicked => { root.restore(); }
@@ -290,9 +341,13 @@ component HistoryPane inherits VerticalLayout {
             selected: root.selected;
             select(id) => { root.select(id); }
         }
-        VersionText {
+        if !root.show-changes: VersionText {
             horizontal-stretch: 1;
             text: root.text;
+        }
+        if root.show-changes: DiffView {
+            horizontal-stretch: 1;
+            rows: root.diff;
         }
     }
     if !root.side-by-side: VerticalLayout {
@@ -304,9 +359,13 @@ component HistoryPane inherits VerticalLayout {
             selected: root.selected;
             select(id) => { root.select(id); }
         }
-        VersionText {
+        if !root.show-changes: VersionText {
             vertical-stretch: 1;
             text: root.text;
+        }
+        if root.show-changes: DiffView {
+            vertical-stretch: 1;
+            rows: root.diff;
         }
     }
 }
@@ -322,6 +381,7 @@ component EditorPane inherits Rectangle {
     in property <[VersionItem]> versions;
     in property <string> history-selected;
     in property <string> history-text;
+    in property <[DiffRow]> history-diff;
     in property <bool> history-side-by-side;
     callback edited(string);
     callback toggle-preview();
@@ -390,6 +450,7 @@ component EditorPane inherits Rectangle {
             versions: root.versions;
             selected: root.history-selected;
             text: root.history-text;
+            diff: root.history-diff;
             side-by-side: root.history-side-by-side;
             select(id) => { root.select-version(id); }
             restore => { root.restore-version(); }
@@ -558,6 +619,7 @@ export component AppWindow inherits Window {
     in property <[VersionItem]> versions;
     in property <string> history-selected;
     in property <string> history-text;
+    in property <[DiffRow]> history-diff;
     in property <string> sync-text: "Starting…";
     in property <int> sync-state: 1;
     in property <string> message;
@@ -649,6 +711,7 @@ export component AppWindow inherits Window {
                 versions: root.versions;
                 history-selected: root.history-selected;
                 history-text: root.history-text;
+                history-diff: root.history-diff;
                 history-side-by-side: root.width >= 1000px;
                 open-history => { root.open-history(); }
                 select-version(id) => { root.select-version(id); }

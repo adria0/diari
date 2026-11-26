@@ -3,7 +3,7 @@
 
 use git2::build::CheckoutBuilder;
 use git2::{
-    Commit, Delta, DiffFindOptions, ErrorCode, FetchOptions, IndexAddOption, IndexEntry, Oid, PushOptions,
+    Commit, Delta, DiffFindOptions, DiffOptions, Patch, ErrorCode, FetchOptions, IndexAddOption, IndexEntry, Oid, PushOptions,
     RemoteCallbacks, Repository, RepositoryInitOptions, Signature, Tree,
 };
 use std::cell::RefCell;
@@ -273,6 +273,56 @@ pub fn file_at(dir: &Path, commit_id: &str, rel: &str) -> Result<Option<String>,
     let Some(id) = blob_at(&commit, rel) else { return Ok(None) };
     let blob = repo.find_blob(id)?;
     Ok(Some(String::from_utf8_lossy(blob.content()).into_owned()))
+}
+
+/// One line of a version's changes.
+#[derive(Debug, Clone, PartialEq)]
+pub enum DiffLine {
+    Added(String),
+    Removed(String),
+    Context(String),
+    /// Separates hunks: lines skipped between them.
+    Gap,
+}
+
+const DIFF_CONTEXT_LINES: u32 = 2;
+
+/// What the version at `commit_id` changed in `rel`, compared with the version
+/// in its first parent (or with an empty file if the note was new then).
+pub fn file_diff(dir: &Path, commit_id: &str, rel: &str) -> Result<Vec<DiffLine>, git2::Error> {
+    let repo = Repository::open(dir)?;
+    let commit = repo.find_commit(Oid::from_str(commit_id)?)?;
+    let content = |c: &Commit| -> Result<Vec<u8>, git2::Error> {
+        match blob_at(c, rel) {
+            Some(id) => Ok(repo.find_blob(id)?.content().to_vec()),
+            None => Ok(Vec::new()),
+        }
+    };
+    let new = content(&commit)?;
+    let old = match commit.parent(0) {
+        Ok(p) => content(&p)?,
+        Err(_) => Vec::new(),
+    };
+    let mut opts = DiffOptions::new();
+    opts.context_lines(DIFF_CONTEXT_LINES);
+    let patch = Patch::from_buffers(&old, None, &new, None, Some(&mut opts))?;
+    let mut out = Vec::new();
+    for h in 0..patch.num_hunks() {
+        if h > 0 {
+            out.push(DiffLine::Gap);
+        }
+        for l in 0..patch.num_lines_in_hunk(h)? {
+            let line = patch.line_in_hunk(h, l)?;
+            let text = String::from_utf8_lossy(line.content()).trim_end_matches(['\n', '\r']).to_string();
+            match line.origin() {
+                '+' => out.push(DiffLine::Added(text)),
+                '-' => out.push(DiffLine::Removed(text)),
+                ' ' => out.push(DiffLine::Context(text)),
+                _ => {} // "no newline at end of file" markers
+            }
+        }
+    }
+    Ok(out)
 }
 
 /// Stage everything (except hidden files) and commit if the tree changed.
@@ -547,6 +597,13 @@ mod tests {
         assert_eq!(texts, vec!["v3", "v2", "v1"]);
         assert_eq!(file_at(&d.dir, &h[2].id, "other.md").unwrap(), None);
         assert!(file_history(&d.dir, "missing.md", 10).unwrap().is_empty());
+
+        use DiffLine::*;
+        assert_eq!(file_diff(&d.dir, &h[2].id, "n.md").unwrap(), vec![Added("v1".into())]);
+        assert_eq!(
+            file_diff(&d.dir, &h[0].id, "n.md").unwrap(),
+            vec![Removed("v2".into()), Added("v3".into())]
+        );
         assert_eq!(file_history(&d.dir, "n.md", 2).unwrap().len(), 2);
     }
 
