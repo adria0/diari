@@ -34,10 +34,19 @@ pub fn sanitize(name: &str) -> String {
     out
 }
 
-/// Move (or copy, across filesystems) `src` into the note's attachment
-/// folder as `name`, adding `-2`, `-3`… if taken. Returns the link target,
-/// relative to the note: `2026_11_26.md.files/photo.jpg`.
-pub fn add(notes_dir: &Path, note_rel: &str, src: &Path, name: &str) -> io::Result<String> {
+/// How `add` takes the file.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Take {
+    /// Move it (a staged copy of a shared file).
+    Move,
+    /// Copy it, leaving the original (a file dropped from Finder).
+    Copy,
+}
+
+/// Put `src` into the note's attachment folder as `name`, adding `-2`, `-3`…
+/// if taken. Returns the link target, relative to the note:
+/// `2026_11_26.md.files/photo.jpg`.
+pub fn add(notes_dir: &Path, note_rel: &str, src: &Path, name: &str, take: Take) -> io::Result<String> {
     let folder_rel = dir_for(note_rel);
     let folder = notes::resolve(notes_dir, &folder_rel)?;
     std::fs::create_dir_all(&folder)?;
@@ -53,9 +62,16 @@ pub fn add(notes_dir: &Path, note_rel: &str, src: &Path, name: &str) -> io::Resu
         n += 1;
     }
     let dest = folder.join(&candidate);
-    if std::fs::rename(src, &dest).is_err() {
-        std::fs::copy(src, &dest)?;
-        let _ = std::fs::remove_file(src);
+    match take {
+        Take::Copy => {
+            std::fs::copy(src, &dest)?;
+        }
+        Take::Move => {
+            if std::fs::rename(src, &dest).is_err() {
+                std::fs::copy(src, &dest)?;
+                let _ = std::fs::remove_file(src);
+            }
+        }
     }
     let folder_name = folder_rel.rsplit('/').next().unwrap_or(&folder_rel);
     Ok(format!("{folder_name}/{candidate}"))
@@ -187,13 +203,14 @@ mod tests {
         for _ in 0..2 {
             let src = d.join("incoming.tmp");
             std::fs::write(&src, b"img").unwrap();
-            add(d, "2026_11_26.md", &src, "photo.jpg").unwrap();
+            add(d, "2026_11_26.md", &src, "photo.jpg", Take::Move).unwrap();
             assert!(!src.exists());
         }
         assert!(d.join("2026_11_26.md.files/photo.jpg").exists());
         let src = d.join("x.tmp");
         std::fs::write(&src, b"img").unwrap();
-        assert_eq!(add(d, "2026_11_26.md", &src, "photo.jpg").unwrap(), "2026_11_26.md.files/photo-3.jpg");
+        assert_eq!(add(d, "2026_11_26.md", &src, "photo.jpg", Take::Copy).unwrap(), "2026_11_26.md.files/photo-3.jpg");
+        assert!(src.exists(), "copy keeps the original");
     }
 
     #[test]

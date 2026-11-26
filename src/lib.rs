@@ -132,6 +132,35 @@ fn desktop_open(what: &std::ffi::OsStr) -> Result<(), String> {
     cmd.arg(what).spawn().map(|_| ()).map_err(|e| e.to_string())
 }
 
+/// Desktop: files dragged from Finder (or any app) onto the window are
+/// attached to the open note. Slint's DropArea doesn't receive drops from
+/// other apps on this backend yet, so this listens to winit directly. winit
+/// sends one event per file; files dropped together are handled as a batch.
+#[cfg(not(target_os = "android"))]
+fn watch_file_drops(ui: &AppWindow) {
+    use slint::winit_030::{winit::event::WindowEvent, EventResult, WinitWindowAccessor};
+    let batch: Rc<RefCell<Vec<PathBuf>>> = Rc::default();
+    ui.window().on_winit_window_event(move |_, event| {
+        match event {
+            WindowEvent::HoveredFile(_) => with_app(|a| a.drag_hover()),
+            WindowEvent::HoveredFileCancelled => with_app(|a| a.drag_cancelled()),
+            WindowEvent::DroppedFile(path) => {
+                let first = batch.borrow().is_empty();
+                batch.borrow_mut().push(path.clone());
+                if first {
+                    let batch = batch.clone();
+                    Timer::single_shot(Duration::ZERO, move || {
+                        let paths = std::mem::take(&mut *batch.borrow_mut());
+                        with_app(|a| a.drop_files(paths));
+                    });
+                }
+            }
+            _ => {}
+        }
+        EventResult::Propagate
+    });
+}
+
 /// Close the app's window on Android (back to the app a share came from).
 /// Nothing to do on desktop, where shares don't happen.
 fn finish_activity() {
@@ -322,15 +351,27 @@ impl App {
         self: &Rc<Self>,
         make: impl FnOnce(&std::path::Path, &str) -> std::io::Result<Vec<String>>,
     ) -> bool {
+        self.add_to_note(None, make)
+    }
+
+    /// Like `add_to_today`, for note `note` (today's note when `None`).
+    fn add_to_note(
+        self: &Rc<Self>,
+        note: Option<String>,
+        make: impl FnOnce(&std::path::Path, &str) -> std::io::Result<Vec<String>>,
+    ) -> bool {
         self.save_now();
         let dir = &self.shared.notes_dir;
         let res = {
             let _g = self.shared.fs_lock.lock().unwrap();
-            let day = chrono::Local::now().date_naive();
-            notes::today(dir, day).and_then(|rel| {
+            let rel = match note {
+                Some(rel) => Ok(rel),
+                None => notes::today(dir, chrono::Local::now().date_naive()),
+            };
+            rel.and_then(|rel| {
                 let lines = make(dir, &rel)?;
                 for line in &lines {
-                    notes::append_to_today(dir, day, line)?;
+                    notes::append_line(dir, &rel, line)?;
                 }
                 Ok((rel, lines.len()))
             })
@@ -354,9 +395,59 @@ impl App {
                 true
             }
             Err(e) => {
-                self.show_message(format!("Could not add to today's note: {e}"), 6);
+                self.show_message(format!("Could not add to the note: {e}"), 6);
                 false
             }
+        }
+    }
+
+    #[cfg(not(target_os = "android"))]
+    /// The note files dropped on the window go to: the open one, else today's.
+    fn drop_target(&self) -> Option<String> {
+        self.editor.borrow().path.clone()
+    }
+
+    #[cfg(not(target_os = "android"))]
+    /// Files dragged over the window (desktop): say where they'd go.
+    fn drag_hover(&self) {
+        let target = self.drop_target().unwrap_or_else(|| "today's note".into());
+        self.ui().set_message(format!("Drop to attach to {target}").into());
+    }
+
+    #[cfg(not(target_os = "android"))]
+    fn drag_cancelled(&self) {
+        self.ui().set_message(SharedString::new());
+    }
+
+    #[cfg(not(target_os = "android"))]
+    /// Files dropped on the window (desktop): copy them into the note's
+    /// attachment folder and link each one, as for files shared on Android.
+    fn drop_files(self: &Rc<Self>, paths: Vec<PathBuf>) {
+        let (files, dirs): (Vec<_>, Vec<_>) = paths.into_iter().partition(|p| p.is_file());
+        if files.is_empty() {
+            if !dirs.is_empty() {
+                self.show_message("Folders can't be attached; drop the files inside them", 6);
+            }
+            return;
+        }
+        let note = self.drop_target();
+        let opened_today = note.is_none();
+        let time = chrono::Local::now().time();
+        let added = self.add_to_note(note, |dir, rel| {
+            let mut lines = Vec::new();
+            for f in &files {
+                let name = f.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+                let target = attachments::add(dir, rel, f, &name, attachments::Take::Copy)?;
+                let label = target.rsplit('/').next().unwrap_or(&target).to_string();
+                lines.push(attachments::link_line(time, &label, &target));
+            }
+            Ok(lines)
+        });
+        if added && opened_today {
+            self.open_today();
+        }
+        if !dirs.is_empty() {
+            self.show_message(format!("Attached {} file(s); folders were skipped", files.len()), 6);
         }
     }
 
@@ -380,7 +471,7 @@ impl App {
         let added = self.add_to_today(|dir, rel| {
             let mut lines = Vec::new();
             for f in &files {
-                let target = attachments::add(dir, rel, &f.path, &f.name)?;
+                let target = attachments::add(dir, rel, &f.path, &f.name, attachments::Take::Move)?;
                 let label = target.rsplit('/').next().unwrap_or(&target).to_string();
                 lines.push(attachments::link_line(time, &label, &target));
             }
@@ -863,6 +954,9 @@ pub fn run(
         None => app.open_today_at_launch(),
     }
     app.engine.request(); // initial sync
+
+    #[cfg(not(target_os = "android"))]
+    watch_file_drops(&ui);
 
     ui.run()?;
 

@@ -251,14 +251,19 @@ pub fn today(dir: &Path, today: chrono::NaiveDate) -> io::Result<String> {
 /// Append `line` to today's note (creating it if needed). Returns its path.
 pub fn append_to_today(dir: &Path, day: chrono::NaiveDate, line: &str) -> io::Result<String> {
     let rel = today(dir, day)?;
-    let mut text = read(dir, &rel)?;
+    append_line(dir, &rel, line)?;
+    Ok(rel)
+}
+
+/// Append `line` at the end of note `rel`, on a line of its own.
+pub fn append_line(dir: &Path, rel: &str, line: &str) -> io::Result<()> {
+    let mut text = read(dir, rel)?;
     if !text.is_empty() && !text.ends_with('\n') {
         text.push('\n');
     }
     text.push_str(line);
     text.push('\n');
-    write(dir, &rel, &text)?;
-    Ok(rel)
+    write(dir, rel, &text)
 }
 
 /// A quick-add entry: `- HH:MM text`, on one line.
