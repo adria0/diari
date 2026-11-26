@@ -6,12 +6,6 @@ export struct NoteItem {
     subtitle: string,
 }
 
-// One line of the note in the line editor.
-export struct EdLine {
-    text: string,
-    heading: bool,
-}
-
 // kind: 0 context, 1 added, 2 removed, 3 gap between hunks
 export struct DiffRow {
     kind: int,
@@ -444,121 +438,6 @@ component HistoryPane inherits VerticalLayout {
     }
 }
 
-// A plain-text editor where each line is its own TextInput, so lines can be
-// styled individually (`#` heading lines are bold). Splitting and joining
-// lines is done in Rust through the callbacks.
-// Desktop only: Android's soft keyboard keeps composing a word across the
-// per-line fields and re-inserts it into the wrong line.
-component LineEditor inherits Rectangle {
-    in property <[EdLine]> lines;
-    in-out property <int> focus-row;
-    in-out property <int> focus-col;
-    in-out property <bool> focus-pending;
-    // The row's text changed; `cursor` is the byte offset of the cursor in it.
-    callback line-edited(int, string, int);
-    // Backspace at the start of a row: join it onto the previous row.
-    callback join-up(int);
-    // Delete at `cursor` in a row; returns true if it joined the next row.
-    callback delete-at(int, int) -> bool;
-
-    function request-focus(row: int, col: int) {
-        root.focus-row = row;
-        root.focus-col = col;
-        root.focus-pending = true;
-    }
-
-    function keep-visible(y: length, h: length) {
-        if y + h + 8px > -sv.content-y + sv.visible-height {
-            sv.content-y = -(y + h + 8px - sv.visible-height);
-        }
-        if y - 8px < -sv.content-y {
-            sv.content-y = min(0px, -(y - 8px));
-        }
-    }
-
-    background: Palette.control-background;
-    border-radius: 4px;
-    border-width: 1px;
-    border-color: Palette.border;
-
-    sv := ScrollView {
-        layout := VerticalLayout {
-            width: sv.visible-width;
-            padding: 12px;
-            spacing: 2px;
-            for line[i] in root.lines: TextInput {
-                property <bool> want-focus: root.focus-pending && root.focus-row == i;
-                property <length> cursor-y;
-                property <length> line-h: self.font-metrics.ascent - self.font-metrics.descent;
-
-                text <=> line.text;
-                single-line: false;
-                wrap: word-wrap;
-                font-family: "monospace";
-                font-size: 14px;
-                font-weight: line.heading ? 700 : 400;
-                color: Palette.foreground;
-
-                function take-focus() {
-                    root.focus-pending = false;
-                    self.focus();
-                    self.set-selection-offsets(root.focus-col, root.focus-col);
-                }
-                init => {
-                    if self.want-focus {
-                        self.take-focus();
-                    }
-                }
-                changed want-focus => {
-                    if self.want-focus {
-                        self.take-focus();
-                    }
-                }
-                edited => {
-                    root.line-edited(i, self.text, self.cursor-position-byte-offset);
-                }
-                cursor-position-changed(pos) => {
-                    self.cursor-y = pos.y;
-                    if self.has-focus {
-                        root.keep-visible(self.y + pos.y, self.line-h);
-                    }
-                }
-                key-pressed(e) => {
-                    if self.has-selection {
-                        return reject;
-                    }
-                    if e.text == Key.Backspace && self.cursor-position-byte-offset == 0 && i > 0 {
-                        root.join-up(i);
-                        return accept;
-                    }
-                    if e.text == Key.Delete && root.delete-at(i, self.cursor-position-byte-offset) {
-                        return accept;
-                    }
-                    if e.text == Key.UpArrow && i > 0 && self.cursor-y < self.line-h / 2 {
-                        root.request-focus(i - 1, self.cursor-position-byte-offset);
-                        return accept;
-                    }
-                    if e.text == Key.DownArrow && i < root.lines.length - 1
-                        && self.cursor-y + self.line-h * 1.5 > self.height {
-                        root.request-focus(i + 1, self.cursor-position-byte-offset);
-                        return accept;
-                    }
-                    reject
-                }
-            }
-            // Clicking below the last line puts the cursor at the end.
-            Rectangle {
-                min-height: 40px;
-                vertical-stretch: 1;
-                TouchArea {
-                    mouse-cursor: text;
-                    clicked => { root.request-focus(root.lines.length - 1, 2147483647); }
-                }
-            }
-        }
-    }
-}
-
 component EditorPane inherits Rectangle {
     in property <string> path;
     in property <bool> dirty;
@@ -566,14 +445,6 @@ component EditorPane inherits Rectangle {
     in property <[MdBlock]> blocks;
     in-out property <bool> preview;
     in-out property <string> text;
-    in property <bool> line-editor;
-    in property <[EdLine]> lines;
-    in-out property <int> focus-row;
-    in-out property <int> focus-col;
-    in-out property <bool> focus-pending;
-    callback line-edited(int, string, int);
-    callback join-up(int);
-    callback delete-at(int, int) -> bool;
     in property <bool> show-history;
     in property <[VersionItem]> versions;
     in property <string> history-selected;
@@ -654,23 +525,13 @@ component EditorPane inherits Rectangle {
             restore => { root.restore-version(); }
             close => { root.close-history(); }
         }
-        if !root.show-history && !root.preview && !root.line-editor: TextEdit {
+        if !root.show-history && !root.preview: TextEdit {
             vertical-stretch: 1;
             text <=> root.text;
             wrap: word-wrap;
             font-family: "monospace";
             font-size: 14px;
             edited(t) => { root.edited(t); }
-        }
-        if !root.show-history && !root.preview && root.line-editor: LineEditor {
-            vertical-stretch: 1;
-            lines: root.lines;
-            focus-row <=> root.focus-row;
-            focus-col <=> root.focus-col;
-            focus-pending <=> root.focus-pending;
-            line-edited(i, t, c) => { root.line-edited(i, t, c); }
-            join-up(i) => { root.join-up(i); }
-            delete-at(i, c) => { return root.delete-at(i, c); }
         }
         if !root.show-history && root.preview: PreviewView {
             vertical-stretch: 1;
@@ -830,13 +691,6 @@ export component AppWindow inherits Window {
     in property <string> history-selected;
     in property <string> history-text;
     in property <[DiffRow]> history-diff;
-    in property <[EdLine]> ed-lines;
-    in-out property <int> ed-focus-row;
-    in-out property <int> ed-focus-col;
-    in-out property <bool> ed-focus-pending;
-    callback ed-line-edited(int, string, int);
-    callback ed-join-up(int);
-    callback ed-delete-at(int, int) -> bool;
     in-out property <string> quick-text;
     in-out property <bool> quick-visible;
     callback quick-add(string);
@@ -929,14 +783,6 @@ export component AppWindow inherits Window {
                 blocks: root.blocks;
                 preview <=> root.preview;
                 text <=> root.editor-text;
-                line-editor: root.desktop;
-                lines: root.ed-lines;
-                focus-row <=> root.ed-focus-row;
-                focus-col <=> root.ed-focus-col;
-                focus-pending <=> root.ed-focus-pending;
-                line-edited(i, t, c) => { root.ed-line-edited(i, t, c); }
-                join-up(i) => { root.ed-join-up(i); }
-                delete-at(i, c) => { return root.ed-delete-at(i, c); }
                 edited(t) => { root.text-edited(t); }
                 toggle-preview => { root.preview-toggled(); }
                 open-link(t) => { root.open-link(t); }

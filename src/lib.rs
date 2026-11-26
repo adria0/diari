@@ -2,7 +2,6 @@ pub mod attachments;
 pub mod config;
 #[cfg(target_os = "android")]
 mod android;
-pub mod lines;
 pub mod markdown;
 pub mod notes;
 pub mod sync;
@@ -10,7 +9,7 @@ pub mod sync;
 slint::include_modules!();
 
 use config::Config;
-use slint::{ComponentHandle, Model, ModelRc, SharedString, Timer, TimerMode, VecModel};
+use slint::{ComponentHandle, ModelRc, SharedString, Timer, TimerMode, VecModel};
 use std::cell::{Cell, RefCell};
 use std::path::PathBuf;
 use std::rc::Rc;
@@ -43,9 +42,6 @@ struct App {
     open_today_after_sync: Cell<bool>,
     /// What was shared to the app at launch, added once the first sync is done.
     pending_share: RefCell<Option<(String, Vec<SharedFile>)>>,
-    /// The open note as lines, mirrored into `ed_model` for the line editor.
-    lines: RefCell<Vec<String>>,
-    ed_model: Rc<VecModel<EdLine>>,
     save_timer: Timer,
     sync_timer: Timer,
     message_timer: Timer,
@@ -92,10 +88,6 @@ const PREVIEW_IMAGE: i32 = 11;
 /// How long the "Added to …" confirmation shows before a share returns to
 /// the app it came from.
 const SHARE_DONE_DELAY: Duration = Duration::from_millis(1500);
-
-fn ed_line(text: &str) -> EdLine {
-    EdLine { text: text.into(), heading: lines::is_heading(text) }
-}
 
 /// Open a web page (or mail link, …) in the system's app for it.
 fn platform_open_url(url: &str) -> Result<(), String> {
@@ -273,9 +265,6 @@ impl App {
 
     /// Replace the editor's whole text (opening, restoring, reloading).
     fn set_text(&self, text: &str) {
-        let lines = lines::split(text);
-        self.ed_model.set_vec(lines.iter().map(|l| ed_line(l)).collect::<Vec<_>>());
-        *self.lines.borrow_mut() = lines;
         self.ui().set_editor_text(text.into());
     }
 
@@ -291,37 +280,6 @@ impl App {
         });
     }
 
-    /// Apply a line edit: update the lines, copy the changed rows into the UI
-    /// model, move the cursor if asked, and mark the note edited.
-    fn apply_line_edit(self: &Rc<Self>, f: impl FnOnce(&mut Vec<String>) -> Option<lines::Focus>) -> bool {
-        let old = self.lines.borrow().clone();
-        let mut new = old.clone();
-        let focus = f(&mut new);
-        let (start, old_end, new_end) = lines::changed_range(&old, &new);
-        let shared = (old_end - start).min(new_end - start);
-        for k in 0..shared {
-            self.ed_model.set_row_data(start + k, ed_line(&new[start + k]));
-        }
-        for k in (start + shared..old_end).rev() {
-            self.ed_model.remove(k);
-        }
-        for k in start + shared..new_end {
-            self.ed_model.insert(k, ed_line(&new[k]));
-        }
-        let changed = old != new;
-        let ui = self.ui();
-        if changed {
-            ui.set_editor_text(lines::join(&new).into());
-            *self.lines.borrow_mut() = new;
-            self.mark_edited();
-        }
-        if let Some(f) = focus {
-            ui.set_ed_focus_row(f.row as i32);
-            ui.set_ed_focus_col(f.col as i32);
-            ui.set_ed_focus_pending(true);
-        }
-        focus.is_some()
-    }
 
     /// Show the quick-add bar (hidden otherwise), prefilled with `text`.
     fn show_quick_add(&self, text: &str) {
@@ -808,8 +766,6 @@ pub fn run(
         history: RefCell::default(),
         open_today_after_sync: Cell::new(false),
         pending_share: RefCell::default(),
-        lines: RefCell::default(),
-        ed_model: Rc::new(VecModel::default()),
         save_timer: Timer::default(),
         sync_timer: Timer::default(),
         message_timer: Timer::default(),
@@ -882,22 +838,6 @@ pub fn run(
         })
     });
     ui.on_text_edited(|_| with_app(|a| a.mark_edited()));
-    ui.set_ed_lines(ModelRc::from(app.ed_model.clone()));
-    ui.on_ed_line_edited(|i, text, cursor| {
-        with_app(|a| {
-            a.apply_line_edit(|l| lines::edit(l, i as usize, &text, cursor.max(0) as usize));
-        })
-    });
-    ui.on_ed_join_up(|i| {
-        with_app(|a| {
-            a.apply_line_edit(|l| lines::join_up(l, i as usize));
-        })
-    });
-    ui.on_ed_delete_at(|i, cursor| {
-        let mut joined = false;
-        with_app(|a| joined = a.apply_line_edit(|l| lines::delete_at(l, i as usize, cursor.max(0) as usize)));
-        joined
-    });
     ui.on_preview_toggled(|| {
         with_app(|a| {
             let ui = a.ui();
