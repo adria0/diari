@@ -1,0 +1,514 @@
+import { Button, LineEdit, TextEdit, ListView, ScrollView, Palette } from "std-widgets.slint";
+
+export struct NoteItem {
+    path: string,
+    title: string,
+    subtitle: string,
+}
+
+// kind: 0 paragraph, 1-6 heading, 7 code, 8 quote, 9 list item, 10 rule
+export struct MdBlock {
+    kind: int,
+    text: string,
+    indent: int,
+}
+
+// state: 0 ok, 1 syncing, 2 error, 3 conflicts, 4 local only
+component StatusChip inherits Rectangle {
+    in property <int> state;
+    in property <string> text;
+    callback clicked();
+    property <color> dot: state == 2 ? #d64545 : state == 3 ? #e8912d : state == 1 ? #3b82f6 : state == 4 ? #9ca3af : #22a55b;
+
+    height: 30px;
+    border-radius: 15px;
+    background: ta.has-hover ? dot.with-alpha(0.28) : dot.with-alpha(0.16);
+    ta := TouchArea {
+        clicked => { root.clicked(); }
+    }
+    HorizontalLayout {
+        padding-left: 10px;
+        padding-right: 12px;
+        spacing: 6px;
+        VerticalLayout {
+            alignment: center;
+            Rectangle {
+                width: 8px;
+                height: 8px;
+                border-radius: 4px;
+                background: root.dot;
+            }
+        }
+        Text {
+            text: root.text;
+            vertical-alignment: center;
+            font-size: 12px;
+            color: Palette.foreground;
+            overflow: elide;
+        }
+    }
+}
+
+component ListPane inherits Rectangle {
+    in property <[NoteItem]> notes;
+    in property <string> current;
+    in property <string> status-text;
+    in property <int> status-state;
+    in-out property <string> filter;
+    callback open(string);
+    callback create(string);
+    callback sync-now();
+    callback settings();
+    callback filter-edited(string);
+
+    function do-create() {
+        if new-name.text != "" {
+            root.create(new-name.text);
+            new-name.text = "";
+        }
+    }
+
+    background: Palette.alternate-background;
+    VerticalLayout {
+        padding: 12px;
+        spacing: 8px;
+        HorizontalLayout {
+            spacing: 8px;
+            Text {
+                text: "Notes";
+                font-size: 22px;
+                font-weight: 700;
+                vertical-alignment: center;
+                color: Palette.foreground;
+                horizontal-stretch: 1;
+            }
+            VerticalLayout {
+                alignment: center;
+                StatusChip {
+                    state: root.status-state;
+                    text: root.status-text;
+                    clicked => { root.sync-now(); }
+                }
+            }
+            Button {
+                text: "Settings";
+                clicked => { root.settings(); }
+            }
+        }
+        LineEdit {
+            placeholder-text: "Search";
+            text <=> root.filter;
+            edited(t) => { root.filter-edited(t); }
+        }
+        HorizontalLayout {
+            spacing: 8px;
+            new-name := LineEdit {
+                placeholder-text: "New note name";
+                accepted => { root.do-create(); }
+            }
+            Button {
+                text: "Create";
+                primary: true;
+                enabled: new-name.text != "";
+                clicked => { root.do-create(); }
+            }
+        }
+        ListView {
+            vertical-stretch: 1;
+            for n in root.notes: Rectangle {
+                height: 54px;
+                border-radius: 6px;
+                background: n.path == root.current ? Palette.selection-background.with-alpha(0.35)
+                    : ta.has-hover ? Palette.foreground.with-alpha(0.06) : transparent;
+                ta := TouchArea {
+                    clicked => { root.open(n.path); }
+                }
+                VerticalLayout {
+                    padding-left: 10px;
+                    padding-right: 10px;
+                    alignment: center;
+                    spacing: 2px;
+                    Text {
+                        text: n.title;
+                        font-size: 15px;
+                        color: Palette.foreground;
+                        overflow: elide;
+                    }
+                    Text {
+                        text: n.subtitle;
+                        font-size: 11px;
+                        color: Palette.foreground.with-alpha(0.55);
+                        overflow: elide;
+                    }
+                }
+            }
+        }
+    }
+}
+
+component PreviewView inherits Rectangle {
+    in property <[MdBlock]> blocks;
+    ListView {
+        for b in root.blocks: HorizontalLayout {
+            padding-left: 12px + b.indent * 20px;
+            padding-right: 12px;
+            padding-top: b.kind >= 1 && b.kind <= 6 ? 12px : 4px;
+            padding-bottom: 4px;
+            spacing: 10px;
+            if b.kind == 8: Rectangle {
+                width: 3px;
+                background: Palette.accent-background;
+            }
+            if b.kind == 10: VerticalLayout {
+                alignment: center;
+                padding-top: 6px;
+                padding-bottom: 6px;
+                Rectangle {
+                    height: 1px;
+                    background: Palette.foreground.with-alpha(0.25);
+                }
+            }
+            if b.kind != 10: Rectangle {
+                background: b.kind == 7 ? Palette.alternate-background : transparent;
+                border-radius: 4px;
+                HorizontalLayout {
+                    padding: b.kind == 7 ? 8px : 0px;
+                    Text {
+                        text: b.text;
+                        wrap: word-wrap;
+                        color: b.kind == 8 ? Palette.foreground.with-alpha(0.75) : Palette.foreground;
+                        font-size: b.kind == 1 ? 28px : b.kind == 2 ? 23px : b.kind == 3 ? 19px : b.kind >= 4 && b.kind <= 6 ? 16px : b.kind == 7 ? 13px : 15px;
+                        font-weight: b.kind >= 1 && b.kind <= 6 ? 700 : 400;
+                        font-family: b.kind == 7 ? "monospace" : "";
+                        font-italic: b.kind == 8;
+                    }
+                }
+            }
+        }
+    }
+}
+
+component EditorPane inherits Rectangle {
+    in property <string> path;
+    in property <bool> dirty;
+    in property <bool> show-back;
+    in property <[MdBlock]> blocks;
+    in-out property <bool> preview;
+    in-out property <string> text;
+    callback edited(string);
+    callback toggle-preview();
+    callback back();
+    callback delete();
+    callback rename(string);
+    property <bool> confirm-delete: false;
+
+    changed path => {
+        name.text = root.path;
+        root.confirm-delete = false;
+    }
+
+    background: Palette.background;
+    VerticalLayout {
+        padding: 12px;
+        spacing: 8px;
+        HorizontalLayout {
+            spacing: 8px;
+            if root.show-back: Button {
+                text: "‹ Back";
+                clicked => { root.back(); }
+            }
+            name := LineEdit {
+                text: root.path;
+                horizontal-stretch: 1;
+                accepted(t) => { root.rename(t); }
+            }
+            VerticalLayout {
+                alignment: center;
+                Text {
+                    text: root.dirty ? "●" : " ";
+                    color: Palette.accent-background;
+                    width: 12px;
+                }
+            }
+            Button {
+                text: root.preview ? "Edit" : "Preview";
+                clicked => { root.toggle-preview(); }
+            }
+            Button {
+                text: root.confirm-delete ? "Really?" : "Delete";
+                clicked => {
+                    if root.confirm-delete {
+                        root.confirm-delete = false;
+                        root.delete();
+                    } else {
+                        root.confirm-delete = true;
+                    }
+                }
+            }
+        }
+        if !root.preview: TextEdit {
+            vertical-stretch: 1;
+            text <=> root.text;
+            wrap: word-wrap;
+            font-family: "monospace";
+            font-size: 14px;
+            edited(t) => { root.edited(t); }
+        }
+        if root.preview: PreviewView {
+            vertical-stretch: 1;
+            blocks: root.blocks;
+        }
+    }
+}
+
+component Field inherits VerticalLayout {
+    in property <string> label;
+    in property <string> placeholder;
+    in-out property <string> value;
+    spacing: 4px;
+    Text {
+        text: root.label;
+        font-size: 12px;
+        color: Palette.foreground.with-alpha(0.7);
+    }
+    LineEdit {
+        text <=> root.value;
+        placeholder-text: root.placeholder;
+    }
+}
+
+component SettingsPane inherits Rectangle {
+    in-out property <string> remote;
+    in-out property <string> branch;
+    in-out property <string> author-name;
+    in-out property <string> author-email;
+    in-out property <string> device;
+    in-out property <string> notes-dir;
+    in property <bool> show-notes-dir;
+    in property <string> public-key;
+    in property <string> key-fingerprint;
+    callback save();
+    callback close();
+    callback regenerate-key();
+    property <bool> copied: false;
+
+    background: Palette.background;
+    ScrollView {
+        VerticalLayout {
+            padding: 16px;
+            spacing: 12px;
+            alignment: start;
+            HorizontalLayout {
+                spacing: 8px;
+                Text {
+                    text: "Settings";
+                    font-size: 22px;
+                    font-weight: 700;
+                    color: Palette.foreground;
+                    horizontal-stretch: 1;
+                    vertical-alignment: center;
+                }
+                Button {
+                    text: "Cancel";
+                    clicked => { root.close(); }
+                }
+                Button {
+                    text: "Save & sync";
+                    primary: true;
+                    clicked => { root.save(); }
+                }
+            }
+            Field {
+                label: "Git remote (SSH)";
+                placeholder: "git@github.com:you/notes.git";
+                value <=> root.remote;
+            }
+            Field {
+                label: "Branch";
+                placeholder: "main";
+                value <=> root.branch;
+            }
+            Field {
+                label: "Author name";
+                value <=> root.author-name;
+            }
+            Field {
+                label: "Author email";
+                value <=> root.author-email;
+            }
+            Field {
+                label: "Device name (used in commits and conflict files)";
+                value <=> root.device;
+            }
+            if root.show-notes-dir: Field {
+                label: "Notes folder (applies after restart)";
+                value <=> root.notes-dir;
+            }
+            Text {
+                text: "SSH public key: add it to your git host as a deploy key with write access";
+                font-size: 12px;
+                wrap: word-wrap;
+                color: Palette.foreground.with-alpha(0.7);
+            }
+            key-view := TextEdit {
+                text: root.public-key;
+                read-only: true;
+                wrap: word-wrap;
+                font-family: "monospace";
+                font-size: 12px;
+                height: 90px;
+            }
+            Text {
+                text: root.key-fingerprint;
+                font-size: 11px;
+                font-family: "monospace";
+                color: Palette.foreground.with-alpha(0.6);
+                wrap: word-wrap;
+            }
+            HorizontalLayout {
+                spacing: 8px;
+                alignment: start;
+                Button {
+                    text: root.copied ? "Copied" : "Copy key";
+                    clicked => {
+                        key-view.select-all();
+                        key-view.copy();
+                        key-view.clear-selection();
+                        root.copied = true;
+                    }
+                }
+                Button {
+                    text: "Generate new key";
+                    clicked => {
+                        root.copied = false;
+                        root.regenerate-key();
+                    }
+                }
+            }
+        }
+    }
+}
+
+export component AppWindow inherits Window {
+    title: "perb";
+    preferred-width: 1000px;
+    preferred-height: 700px;
+    min-width: 320px;
+    min-height: 420px;
+    background: Palette.background;
+
+    in property <[NoteItem]> notes;
+    in-out property <string> filter;
+    in-out property <string> current-path;
+    in-out property <string> editor-text;
+    in-out property <bool> dirty;
+    in-out property <bool> preview;
+    in property <[MdBlock]> blocks;
+    in property <string> sync-text: "Starting…";
+    in property <int> sync-state: 1;
+    in property <string> message;
+    in property <bool> desktop;
+    in-out property <bool> show-settings;
+
+    in-out property <string> cfg-remote;
+    in-out property <string> cfg-branch;
+    in-out property <string> cfg-author-name;
+    in-out property <string> cfg-author-email;
+    in-out property <string> cfg-device;
+    in-out property <string> cfg-notes-dir;
+    in property <string> public-key;
+    in property <string> key-fingerprint;
+
+    callback open-note(string);
+    callback new-note(string);
+    callback rename-note(string);
+    callback delete-note();
+    callback text-edited(string);
+    callback preview-toggled();
+    callback sync-now();
+    callback open-settings();
+    callback save-settings();
+    callback regenerate-key();
+    callback filter-edited(string);
+    callback back();
+
+    property <bool> wide: root.width >= 720px;
+
+    VerticalLayout {
+        x: 0;
+        y: 0;
+        width: root.width;
+        height: root.height;
+        if root.show-settings: SettingsPane {
+            vertical-stretch: 1;
+            remote <=> root.cfg-remote;
+            branch <=> root.cfg-branch;
+            author-name <=> root.cfg-author-name;
+            author-email <=> root.cfg-author-email;
+            device <=> root.cfg-device;
+            notes-dir <=> root.cfg-notes-dir;
+            show-notes-dir: root.desktop;
+            public-key: root.public-key;
+            key-fingerprint: root.key-fingerprint;
+            save => { root.save-settings(); }
+            close => { root.show-settings = false; }
+            regenerate-key => { root.regenerate-key(); }
+        }
+
+        if !root.show-settings: HorizontalLayout {
+            vertical-stretch: 1;
+            if root.wide || root.current-path == "": ListPane {
+                width: root.wide ? 300px : root.width;
+                notes: root.notes;
+                current: root.current-path;
+                status-text: root.sync-text;
+                status-state: root.sync-state;
+                filter <=> root.filter;
+                open(p) => { root.open-note(p); }
+                create(n) => { root.new-note(n); }
+                sync-now => { root.sync-now(); }
+                settings => { root.open-settings(); }
+                filter-edited(t) => { root.filter-edited(t); }
+            }
+            if root.wide: Rectangle {
+                width: 1px;
+                background: Palette.foreground.with-alpha(0.12);
+            }
+            if root.current-path != "": EditorPane {
+                horizontal-stretch: 1;
+                path: root.current-path;
+                dirty: root.dirty;
+                show-back: !root.wide;
+                blocks: root.blocks;
+                preview <=> root.preview;
+                text <=> root.editor-text;
+                edited(t) => { root.text-edited(t); }
+                toggle-preview => { root.preview-toggled(); }
+                back => { root.back(); }
+                delete => { root.delete-note(); }
+                rename(n) => { root.rename-note(n); }
+            }
+            if root.wide && root.current-path == "": Rectangle {
+                horizontal-stretch: 1;
+                Text {
+                    text: "Select or create a note";
+                    color: Palette.foreground.with-alpha(0.5);
+                    font-size: 16px;
+                }
+            }
+        }
+
+        if root.message != "": Rectangle {
+            background: #d6454530;
+            HorizontalLayout {
+                padding: 8px;
+                Text {
+                    text: root.message;
+                    wrap: word-wrap;
+                    color: Palette.foreground;
+                    font-size: 12px;
+                }
+            }
+        }
+    }
+}

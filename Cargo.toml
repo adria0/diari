@@ -1,0 +1,51 @@
+[package]
+name = "perb"
+version = "0.1.0"
+edition = "2021"
+description = "Native markdown notes with automatic git sync"
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[[bin]]
+name = "perb"
+path = "src/main.rs"
+
+[dependencies]
+slint = "1.19"
+git2 = { version = "0.21", default-features = false, features = ["ssh", "vendored-libgit2", "vendored-openssl"] }
+ssh-key = { version = "0.6", features = ["ed25519", "rand_core", "std"] }
+rand_core = { version = "0.6", features = ["getrandom"] }
+pulldown-cmark = { version = "0.13", default-features = false }
+serde = { version = "1", features = ["derive"] }
+toml = "0.9"
+chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
+log = "0.4"
+
+[target.'cfg(not(target_os = "android"))'.dependencies]
+env_logger = "0.11"
+dirs = "6"
+
+[target.'cfg(target_os = "android")'.dependencies]
+slint = { version = "1.19", features = ["backend-android-activity-06"] }
+android_logger = "0.15"
+
+[build-dependencies]
+slint-build = "1.19"
+
+[dev-dependencies]
+tempfile = "3"
+
+[package.metadata.android]
+package = "dev.perb.app"
+build_targets = ["aarch64-linux-android"]
+
+[package.metadata.android.sdk]
+min_sdk_version = 26
+target_sdk_version = 34
+
+[[package.metadata.android.uses_permission]]
+name = "android.permission.INTERNET"
+
+[package.metadata.android.application]
+label = "perb"
