@@ -29,6 +29,7 @@ dirs = "6"
 [target.'cfg(target_os = "android")'.dependencies]
 slint = { version = "1.19", features = ["backend-android-activity-06"] }
 android_logger = "0.15"
+jni = "0.21"
 
 [build-dependencies]
 slint-build = "1.19"
@@ -49,3 +50,10 @@ name = "android.permission.INTERNET"
 
 [package.metadata.android.application]
 label = "perb"
+
+# Appear in Android's share menu for text (links, selections): the shared text
+# opens perb's quick-add field. The MAIN/LAUNCHER filter is added by cargo-apk.
+[[package.metadata.android.application.activity.intent_filter]]
+actions = ["android.intent.action.SEND"]
+categories = ["android.intent.category.DEFAULT"]
+data = [{ mime_type = "text/plain" }]

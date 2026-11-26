@@ -1,4 +1,6 @@
 pub mod config;
+#[cfg(target_os = "android")]
+mod android;
 pub mod lines;
 pub mod markdown;
 pub mod notes;
@@ -54,6 +56,14 @@ fn with_app(f: impl FnOnce(&Rc<App>)) {
     if let Some(app) = APP.with(|a| a.borrow().clone()) {
         f(&app);
     }
+}
+
+/// Set before `run` when the app was started to quick-add a line (Android
+/// share or shortcut): the text to prefill, possibly empty.
+static LAUNCH_QUICK_ADD: Mutex<Option<String>> = Mutex::new(None);
+
+pub fn set_launch_quick_add(text: String) {
+    *LAUNCH_QUICK_ADD.lock().unwrap() = Some(text);
 }
 
 fn ed_line(text: &str) -> EdLine {
@@ -213,6 +223,43 @@ impl App {
             ui.set_ed_focus_pending(true);
         }
         focus.is_some()
+    }
+
+    /// Show the quick-add field, prefilled with `text`, and focus it.
+    fn show_quick_add(&self, text: &str) {
+        let ui = self.ui();
+        ui.set_quick_text(text.into());
+        ui.set_quick_focus_seq(ui.get_quick_focus_seq() + 1);
+    }
+
+    /// Append `- HH:MM text` to today's note without opening it.
+    fn quick_add(self: &Rc<Self>, text: &str) {
+        if text.trim().is_empty() {
+            return;
+        }
+        self.save_now();
+        let now = chrono::Local::now();
+        let line = notes::quick_line(now.time(), text);
+        let res = {
+            let _g = self.shared.fs_lock.lock().unwrap();
+            notes::append_to_today(&self.shared.notes_dir, now.date_naive(), &line)
+        };
+        match res {
+            Ok(rel) => {
+                // If that note is open, show the new line there too.
+                if self.editor.borrow().path.as_deref() == Some(rel.as_str()) {
+                    if let Ok(t) = notes::read(&self.shared.notes_dir, &rel) {
+                        self.editor.borrow_mut().saved = t.clone();
+                        self.set_text(&t);
+                    }
+                }
+                self.ui().set_quick_text(SharedString::new());
+                self.refresh_list();
+                self.show_message(format!("Added to {rel}"), 4);
+                self.engine.request();
+            }
+            Err(e) => self.show_message(format!("Could not add to today's note: {e}"), 6),
+        }
     }
 
     /// Open today's note, creating it if needed.
@@ -522,6 +569,7 @@ pub fn run(
         })
     });
     ui.on_open_today(|| with_app(|a| a.open_today()));
+    ui.on_quick_add(|t| with_app(|a| a.quick_add(&t)));
     ui.on_rename_note(|name| {
         with_app(|a| {
             a.save_now();
@@ -631,7 +679,10 @@ pub fn run(
     });
 
     app.refresh_list();
-    app.open_today_at_launch();
+    match LAUNCH_QUICK_ADD.lock().unwrap().take() {
+        Some(text) => app.show_quick_add(&text),
+        None => app.open_today_at_launch(),
+    }
     app.engine.request(); // initial sync
 
     ui.run()?;
@@ -652,9 +703,21 @@ fn android_main(app: slint::android::AndroidApp) {
     let data_dir = app
         .internal_data_path()
         .unwrap_or_else(|| PathBuf::from("/data/local/tmp/perb"));
-    slint::android::init_with_event_listener(app, |event| match event {
+    if let Some(text) = android::launch_quick_add(&app) {
+        set_launch_quick_add(text);
+    }
+    android::register_quick_add_shortcut(&app);
+
+    let app_for_events = app.clone();
+    slint::android::init_with_event_listener(app, move |event| match event {
         PollEvent::Main(MainEvent::Resume { .. }) => request_sync(),
         PollEvent::Main(MainEvent::Pause) | PollEvent::Main(MainEvent::SaveState { .. }) => flush(),
+        // Leaving perb ends this activity: edits are already saved (Pause) and
+        // a sync is queued; the next launch starts fresh with its own intent.
+        PollEvent::Main(MainEvent::Stop) => {
+            request_sync();
+            android::finish(&app_for_events);
+        }
         _ => {}
     })
     .expect("init Slint Android backend");

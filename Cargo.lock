@@ -3903,6 +3903,7 @@ dependencies = [
  "dirs",
  "env_logger",
  "git2",
+ "jni 0.21.1",
  "log",
  "pulldown-cmark",
  "rand_core",

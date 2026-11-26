@@ -222,6 +222,25 @@ pub fn today(dir: &Path, today: chrono::NaiveDate) -> io::Result<String> {
     }
 }
 
+/// Append `line` to today's note (creating it if needed). Returns its path.
+pub fn append_to_today(dir: &Path, day: chrono::NaiveDate, line: &str) -> io::Result<String> {
+    let rel = today(dir, day)?;
+    let mut text = read(dir, &rel)?;
+    if !text.is_empty() && !text.ends_with('\n') {
+        text.push('\n');
+    }
+    text.push_str(line);
+    text.push('\n');
+    write(dir, &rel, &text)?;
+    Ok(rel)
+}
+
+/// A quick-add entry: `- HH:MM text`, on one line.
+pub fn quick_line(time: chrono::NaiveTime, text: &str) -> String {
+    let text = text.split_whitespace().collect::<Vec<_>>().join(" ");
+    format!("- {} {text}", time.format("%H:%M"))
+}
+
 /// Write via temp file + rename so a crash never leaves a half-written note.
 pub fn atomic_write(path: &Path, data: &[u8]) -> io::Result<()> {
     let dir = path.parent().ok_or_else(|| io::Error::other("no parent dir"))?;
@@ -328,6 +347,20 @@ mod tests {
         assert_eq!(snippet("  short line  ", "short"), "short line");
         let accents = format!("{}Café{}", "é".repeat(90), "x".repeat(90));
         assert!(snippet(&accents, "café").contains("Café"));
+    }
+
+    #[test]
+    fn quick_add_appends_to_today() {
+        let tmp = tempfile::tempdir().unwrap();
+        let d = tmp.path();
+        let day = chrono::NaiveDate::from_ymd_opt(2026, 3, 7).unwrap();
+        let t = chrono::NaiveTime::from_hms_opt(9, 5, 0).unwrap();
+        assert_eq!(quick_line(t, "  read\nthis   link "), "- 09:05 read this link");
+        assert_eq!(append_to_today(d, day, "- 09:05 a").unwrap(), "2026_03_07.md");
+        assert_eq!(read(d, "2026_03_07.md").unwrap(), "# 2026_03_07\n\n- 09:05 a\n");
+        write(d, "2026_03_07.md", "no newline").unwrap();
+        append_to_today(d, day, "- 09:06 b").unwrap();
+        assert_eq!(read(d, "2026_03_07.md").unwrap(), "no newline\n- 09:06 b\n");
     }
 
     #[test]

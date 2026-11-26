@@ -74,6 +74,9 @@ component ListPane inherits Rectangle {
     in property <int> status-state;
     in-out property <string> filter;
     in property <string> default-new-name;
+    in-out property <string> quick-text;
+    in property <int> quick-focus-seq;
+    callback quick-add(string);
     callback open(string);
     callback create(string);
     callback today();
@@ -86,6 +89,16 @@ component ListPane inherits Rectangle {
             root.create(new-name.text);
             new-name.text = root.default-new-name;
         }
+    }
+
+    function do-quick-add() {
+        if root.quick-text != "" {
+            root.quick-add(root.quick-text);
+        }
+    }
+
+    changed quick-focus-seq => {
+        quick.focus();
     }
 
     changed default-new-name => {
@@ -124,6 +137,20 @@ component ListPane inherits Rectangle {
             Button {
                 text: "Settings";
                 clicked => { root.settings(); }
+            }
+        }
+        HorizontalLayout {
+            spacing: 8px;
+            quick := LineEdit {
+                placeholder-text: "Add a line to today…";
+                text <=> root.quick-text;
+                accepted => { root.do-quick-add(); }
+            }
+            Button {
+                text: "Add";
+                primary: true;
+                enabled: root.quick-text != "";
+                clicked => { root.do-quick-add(); }
             }
         }
         LineEdit {
@@ -766,6 +793,9 @@ export component AppWindow inherits Window {
     callback ed-line-edited(int, string, int);
     callback ed-join-up(int);
     callback ed-delete-at(int, int) -> bool;
+    in-out property <string> quick-text;
+    in-out property <int> quick-focus-seq;
+    callback quick-add(string);
     in property <string> sync-text: "Starting…";
     in property <int> sync-state: 1;
     in property <string> message;
@@ -832,6 +862,9 @@ export component AppWindow inherits Window {
                 status-state: root.sync-state;
                 filter <=> root.filter;
                 default-new-name: root.default-new-name;
+                quick-text <=> root.quick-text;
+                quick-focus-seq: root.quick-focus-seq;
+                quick-add(t) => { root.quick-add(t); }
                 open(p) => { root.open-note(p); }
                 create(n) => { root.new-note(n); }
                 today => { root.open-today(); }
