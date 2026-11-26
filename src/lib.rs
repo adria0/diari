@@ -1,4 +1,5 @@
 pub mod config;
+pub mod lines;
 pub mod markdown;
 pub mod notes;
 pub mod sync;
@@ -6,7 +7,7 @@ pub mod sync;
 slint::include_modules!();
 
 use config::Config;
-use slint::{ComponentHandle, ModelRc, SharedString, Timer, TimerMode, VecModel};
+use slint::{ComponentHandle, Model, ModelRc, SharedString, Timer, TimerMode, VecModel};
 use std::cell::{Cell, RefCell};
 use std::path::PathBuf;
 use std::rc::Rc;
@@ -37,6 +38,9 @@ struct App {
     /// Today's note didn't exist at launch: open (and create) it once the
     /// first sync is done, so a copy written on another device comes first.
     open_today_after_sync: Cell<bool>,
+    /// The open note as lines, mirrored into `ed_model` for the line editor.
+    lines: RefCell<Vec<String>>,
+    ed_model: Rc<VecModel<EdLine>>,
     save_timer: Timer,
     sync_timer: Timer,
     message_timer: Timer,
@@ -50,6 +54,10 @@ fn with_app(f: impl FnOnce(&Rc<App>)) {
     if let Some(app) = APP.with(|a| a.borrow().clone()) {
         f(&app);
     }
+}
+
+fn ed_line(text: &str) -> EdLine {
+    EdLine { text: text.into(), heading: lines::is_heading(text) }
 }
 
 /// Ask for a sync from anywhere on the UI thread (e.g. Android resume).
@@ -135,7 +143,7 @@ impl App {
         match notes::read(&self.shared.notes_dir, path) {
             Ok(text) => {
                 *self.editor.borrow_mut() = EditorState { path: Some(path.to_string()), saved: text.clone() };
-                ui.set_editor_text(text.into());
+                self.set_text(&text);
                 ui.set_current_path(path.into());
                 ui.set_dirty(false);
                 ui.set_preview(false);
@@ -149,10 +157,62 @@ impl App {
         *self.editor.borrow_mut() = EditorState::default();
         let ui = self.ui();
         ui.set_current_path(SharedString::new());
-        ui.set_editor_text(SharedString::new());
+        self.set_text("");
         ui.set_dirty(false);
         ui.set_preview(false);
         self.close_history();
+    }
+
+    /// Replace the editor's whole text (opening, restoring, reloading).
+    fn set_text(&self, text: &str) {
+        let lines = lines::split(text);
+        self.ed_model.set_vec(lines.iter().map(|l| ed_line(l)).collect::<Vec<_>>());
+        *self.lines.borrow_mut() = lines;
+        self.ui().set_editor_text(text.into());
+    }
+
+    /// The user changed the text: mark it dirty and schedule the autosave.
+    fn mark_edited(self: &Rc<Self>) {
+        self.ui().set_dirty(true);
+        let weak = Rc::downgrade(self);
+        self.save_timer.start(TimerMode::SingleShot, AUTOSAVE_DELAY, move || {
+            if let Some(a) = weak.upgrade() {
+                a.save_now();
+                a.refresh_list();
+            }
+        });
+    }
+
+    /// Apply a line edit: update the lines, copy the changed rows into the UI
+    /// model, move the cursor if asked, and mark the note edited.
+    fn apply_line_edit(self: &Rc<Self>, f: impl FnOnce(&mut Vec<String>) -> Option<lines::Focus>) -> bool {
+        let old = self.lines.borrow().clone();
+        let mut new = old.clone();
+        let focus = f(&mut new);
+        let (start, old_end, new_end) = lines::changed_range(&old, &new);
+        let shared = (old_end - start).min(new_end - start);
+        for k in 0..shared {
+            self.ed_model.set_row_data(start + k, ed_line(&new[start + k]));
+        }
+        for k in (start + shared..old_end).rev() {
+            self.ed_model.remove(k);
+        }
+        for k in start + shared..new_end {
+            self.ed_model.insert(k, ed_line(&new[k]));
+        }
+        let changed = old != new;
+        let ui = self.ui();
+        if changed {
+            ui.set_editor_text(lines::join(&new).into());
+            *self.lines.borrow_mut() = new;
+            self.mark_edited();
+        }
+        if let Some(f) = focus {
+            ui.set_ed_focus_row(f.row as i32);
+            ui.set_ed_focus_col(f.col as i32);
+            ui.set_ed_focus_pending(true);
+        }
+        focus.is_some()
     }
 
     /// Open today's note, creating it if needed.
@@ -248,8 +308,8 @@ impl App {
         };
         let when = self.history.borrow().iter().find(|v| v.id == id).map(|v| v.time.clone()).unwrap_or_default();
         self.close_history();
-        ui.set_editor_text(text.into());
-        ui.invoke_text_edited(ui.get_editor_text());
+        self.set_text(&text);
+        self.mark_edited();
         self.show_message(format!("Restored version from {when}"), 6);
     }
 
@@ -379,7 +439,7 @@ impl App {
             Ok(text) => {
                 if text != self.editor.borrow().saved {
                     self.editor.borrow_mut().saved = text.clone();
-                    ui.set_editor_text(text.into());
+                    self.set_text(&text);
                     if ui.get_preview() {
                         self.update_preview();
                     }
@@ -437,6 +497,8 @@ pub fn run(
         editor: RefCell::default(),
         history: RefCell::default(),
         open_today_after_sync: Cell::new(false),
+        lines: RefCell::default(),
+        ed_model: Rc::new(VecModel::default()),
         save_timer: Timer::default(),
         sync_timer: Timer::default(),
         message_timer: Timer::default(),
@@ -502,17 +564,22 @@ pub fn run(
             }
         })
     });
-    ui.on_text_edited(|_| {
+    ui.on_text_edited(|_| with_app(|a| a.mark_edited()));
+    ui.set_ed_lines(ModelRc::from(app.ed_model.clone()));
+    ui.on_ed_line_edited(|i, text, cursor| {
         with_app(|a| {
-            a.ui().set_dirty(true);
-            let weak = Rc::downgrade(a);
-            a.save_timer.start(TimerMode::SingleShot, AUTOSAVE_DELAY, move || {
-                if let Some(a) = weak.upgrade() {
-                    a.save_now();
-                    a.refresh_list();
-                }
-            });
+            a.apply_line_edit(|l| lines::edit(l, i as usize, &text, cursor.max(0) as usize));
         })
+    });
+    ui.on_ed_join_up(|i| {
+        with_app(|a| {
+            a.apply_line_edit(|l| lines::join_up(l, i as usize));
+        })
+    });
+    ui.on_ed_delete_at(|i, cursor| {
+        let mut joined = false;
+        with_app(|a| joined = a.apply_line_edit(|l| lines::delete_at(l, i as usize, cursor.max(0) as usize)));
+        joined
     });
     ui.on_preview_toggled(|| {
         with_app(|a| {
