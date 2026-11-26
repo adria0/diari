@@ -7,7 +7,7 @@ slint::include_modules!();
 
 use config::Config;
 use slint::{ComponentHandle, ModelRc, SharedString, Timer, TimerMode, VecModel};
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::path::PathBuf;
 use std::rc::Rc;
 use std::sync::{Arc, Mutex};
@@ -34,6 +34,9 @@ struct App {
     editor: RefCell<EditorState>,
     /// Versions shown in the history view of the open note.
     history: RefCell<Vec<sync::git::Version>>,
+    /// Today's note didn't exist at launch: open (and create) it once the
+    /// first sync is done, so a copy written on another device comes first.
+    open_today_after_sync: Cell<bool>,
     save_timer: Timer,
     sync_timer: Timer,
     message_timer: Timer,
@@ -150,6 +153,31 @@ impl App {
         ui.set_dirty(false);
         ui.set_preview(false);
         self.close_history();
+    }
+
+    /// Open today's note, creating it if needed.
+    fn open_today(self: &Rc<Self>) {
+        let res = {
+            let _g = self.shared.fs_lock.lock().unwrap();
+            notes::today(&self.shared.notes_dir, chrono::Local::now().date_naive())
+        };
+        match res {
+            Ok(rel) => {
+                self.refresh_list();
+                self.open(&rel);
+            }
+            Err(e) => self.show_message(format!("Could not open today's note: {e}"), 6),
+        }
+    }
+
+    /// At launch: open today's note now if it exists, else after the first sync.
+    fn open_today_at_launch(self: &Rc<Self>) {
+        let name = format!("{}.md", chrono::Local::now().format("%Y_%m_%d"));
+        if self.shared.notes_dir.join(&name).exists() {
+            self.open(&name);
+        } else {
+            self.open_today_after_sync.set(true);
+        }
     }
 
     fn open_history(self: &Rc<Self>) {
@@ -298,6 +326,15 @@ impl App {
     }
 
     fn on_sync_done(self: &Rc<Self>, report: Report) {
+        if self.open_today_after_sync.replace(false) && self.editor.borrow().path.is_none() {
+            // Run after this handler so the list reflects what sync pulled in.
+            let weak = Rc::downgrade(self);
+            slint::Timer::single_shot(Duration::ZERO, move || {
+                if let Some(a) = weak.upgrade() {
+                    a.open_today();
+                }
+            });
+        }
         let ui = self.ui();
         let now = chrono::Local::now().format("%H:%M").to_string();
         let local_only = self.shared.config.lock().unwrap().remote_url.trim().is_empty();
@@ -399,6 +436,7 @@ pub fn run(
         engine,
         editor: RefCell::default(),
         history: RefCell::default(),
+        open_today_after_sync: Cell::new(false),
         save_timer: Timer::default(),
         sync_timer: Timer::default(),
         message_timer: Timer::default(),
@@ -421,21 +459,7 @@ pub fn run(
             }
         })
     });
-    ui.on_open_today(|| {
-        with_app(|a| {
-            let res = {
-                let _g = a.shared.fs_lock.lock().unwrap();
-                notes::today(&a.shared.notes_dir, chrono::Local::now().date_naive())
-            };
-            match res {
-                Ok(rel) => {
-                    a.refresh_list();
-                    a.open(&rel);
-                }
-                Err(e) => a.show_message(format!("Could not open today's note: {e}"), 6),
-            }
-        })
-    });
+    ui.on_open_today(|| with_app(|a| a.open_today()));
     ui.on_rename_note(|name| {
         with_app(|a| {
             a.save_now();
@@ -540,6 +564,7 @@ pub fn run(
     });
 
     app.refresh_list();
+    app.open_today_at_launch();
     app.engine.request(); // initial sync
 
     ui.run()?;
