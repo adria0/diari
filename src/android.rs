@@ -5,6 +5,23 @@
 use jni::objects::{JObject, JString, JValue};
 use jni::{JNIEnv, JavaVM};
 use slint::android::AndroidApp;
+use std::sync::Mutex;
+
+use crate::Launch;
+
+/// The running activity, so app code can finish it (see `finish_current`).
+static APP: Mutex<Option<AndroidApp>> = Mutex::new(None);
+
+pub fn set_app(app: &AndroidApp) {
+    *APP.lock().unwrap() = Some(app.clone());
+}
+
+/// Finish the running activity, returning to whatever was shown before.
+pub fn finish_current() {
+    if let Some(app) = APP.lock().unwrap().clone() {
+        finish(&app);
+    }
+}
 
 /// Action of the "Quick add" launcher shortcut.
 /// Tied to the Android package ID, which stays `dev.perb.app` (the app was
@@ -44,9 +61,9 @@ fn string_extra(env: &mut JNIEnv, intent: &JObject, key: &str) -> jni::errors::R
     to_string(env, v)
 }
 
-/// If diari was started to quick-add a line, the text to prefill: the shared
-/// text (with its subject, e.g. a page title), or empty for the shortcut.
-pub fn launch_quick_add(app: &AndroidApp) -> Option<String> {
+/// Why diari was started, if not from the launcher: text shared to it (with
+/// its subject, e.g. a page title), or the "Quick add" shortcut.
+pub fn launch_request(app: &AndroidApp) -> Option<Launch> {
     with_activity(app, |env, activity| {
         let intent = env.call_method(activity, "getIntent", "()Landroid/content/Intent;", &[])?.l()?;
         if intent.is_null() {
@@ -57,9 +74,9 @@ pub fn launch_quick_add(app: &AndroidApp) -> Option<String> {
             Some("android.intent.action.SEND") => {
                 let text = string_extra(env, &intent, "android.intent.extra.TEXT")?.unwrap_or_default();
                 let subject = string_extra(env, &intent, "android.intent.extra.SUBJECT")?.unwrap_or_default();
-                Ok(Some(combine_share(&subject, &text)))
+                Ok(Some(Launch::Share(combine_share(&subject, &text))))
             }
-            Some(QUICK_ADD_ACTION) => Ok(Some(String::new())),
+            Some(QUICK_ADD_ACTION) => Ok(Some(Launch::QuickAdd)),
             _ => Ok(None),
         }
     })

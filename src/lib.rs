@@ -40,6 +40,8 @@ struct App {
     /// Today's note didn't exist at launch: open (and create) it once the
     /// first sync is done, so a copy written on another device comes first.
     open_today_after_sync: Cell<bool>,
+    /// Text shared to the app at launch, appended once the first sync is done.
+    pending_share: RefCell<Option<String>>,
     /// The open note as lines, mirrored into `ed_model` for the line editor.
     lines: RefCell<Vec<String>>,
     ed_model: Rc<VecModel<EdLine>>,
@@ -58,16 +60,35 @@ fn with_app(f: impl FnOnce(&Rc<App>)) {
     }
 }
 
-/// Set before `run` when the app was started to quick-add a line (Android
-/// share or shortcut): the text to prefill, possibly empty.
-static LAUNCH_QUICK_ADD: Mutex<Option<String>> = Mutex::new(None);
-
-pub fn set_launch_quick_add(text: String) {
-    *LAUNCH_QUICK_ADD.lock().unwrap() = Some(text);
+/// Why the app was started, when it wasn't from the launcher (Android).
+#[derive(Debug, Clone, PartialEq)]
+pub enum Launch {
+    /// Text sent from another app's share sheet: append it to today's note.
+    Share(String),
+    /// The "Quick add" shortcut: show the quick-add bar.
+    QuickAdd,
 }
+
+/// Set before `run`.
+static LAUNCH: Mutex<Option<Launch>> = Mutex::new(None);
+
+pub fn set_launch(launch: Launch) {
+    *LAUNCH.lock().unwrap() = Some(launch);
+}
+
+/// How long the "Added to …" confirmation shows before a share returns to
+/// the app it came from.
+const SHARE_DONE_DELAY: Duration = Duration::from_millis(1500);
 
 fn ed_line(text: &str) -> EdLine {
     EdLine { text: text.into(), heading: lines::is_heading(text) }
+}
+
+/// Close the app's window on Android (back to the app a share came from).
+/// Nothing to do on desktop, where shares don't happen.
+fn finish_activity() {
+    #[cfg(target_os = "android")]
+    android::finish_current();
 }
 
 /// Ask for a sync from anywhere on the UI thread (e.g. Android resume).
@@ -233,9 +254,9 @@ impl App {
     }
 
     /// Append `- HH:MM text` to today's note without opening it.
-    fn quick_add(self: &Rc<Self>, text: &str) {
+    fn quick_add(self: &Rc<Self>, text: &str) -> bool {
         if text.trim().is_empty() {
-            return;
+            return false;
         }
         self.save_now();
         let now = chrono::Local::now();
@@ -258,8 +279,31 @@ impl App {
                 self.refresh_list();
                 self.show_message(format!("Added to {rel}"), 4);
                 self.engine.request();
+                true
             }
-            Err(e) => self.show_message(format!("Could not add to today's note: {e}"), 6),
+            Err(e) => {
+                self.show_message(format!("Could not add to today's note: {e}"), 6);
+                false
+            }
+        }
+    }
+
+    /// Text shared from another app: append it after the first sync (so a
+    /// today's note made on another device is pulled in first), then return
+    /// to that app.
+    fn receive_share(self: &Rc<Self>, text: String) {
+        if text.trim().is_empty() {
+            finish_activity();
+            return;
+        }
+        self.ui().set_message("Adding to today's note…".into());
+        *self.pending_share.borrow_mut() = Some(text);
+    }
+
+    fn finish_pending_share(self: &Rc<Self>) {
+        let Some(text) = self.pending_share.borrow_mut().take() else { return };
+        if self.quick_add(&text) {
+            slint::Timer::single_shot(SHARE_DONE_DELAY, finish_activity);
         }
     }
 
@@ -434,6 +478,14 @@ impl App {
     }
 
     fn on_sync_done(self: &Rc<Self>, report: Report) {
+        if self.pending_share.borrow().is_some() {
+            let weak = Rc::downgrade(self);
+            slint::Timer::single_shot(Duration::ZERO, move || {
+                if let Some(a) = weak.upgrade() {
+                    a.finish_pending_share();
+                }
+            });
+        }
         if self.open_today_after_sync.replace(false) && self.editor.borrow().path.is_none() {
             // Run after this handler so the list reflects what sync pulled in.
             let weak = Rc::downgrade(self);
@@ -545,6 +597,7 @@ pub fn run(
         editor: RefCell::default(),
         history: RefCell::default(),
         open_today_after_sync: Cell::new(false),
+        pending_share: RefCell::default(),
         lines: RefCell::default(),
         ed_model: Rc::new(VecModel::default()),
         save_timer: Timer::default(),
@@ -570,7 +623,11 @@ pub fn run(
         })
     });
     ui.on_open_today(|| with_app(|a| a.open_today()));
-    ui.on_quick_add(|t| with_app(|a| a.quick_add(&t)));
+    ui.on_quick_add(|t| {
+        with_app(|a| {
+            a.quick_add(&t);
+        })
+    });
     ui.on_rename_note(|name| {
         with_app(|a| {
             a.save_now();
@@ -680,8 +737,9 @@ pub fn run(
     });
 
     app.refresh_list();
-    match LAUNCH_QUICK_ADD.lock().unwrap().take() {
-        Some(text) => app.show_quick_add(&text),
+    match LAUNCH.lock().unwrap().take() {
+        Some(Launch::Share(text)) => app.receive_share(text),
+        Some(Launch::QuickAdd) => app.show_quick_add(""),
         None => app.open_today_at_launch(),
     }
     app.engine.request(); // initial sync
@@ -704,9 +762,10 @@ fn android_main(app: slint::android::AndroidApp) {
     let data_dir = app
         .internal_data_path()
         .unwrap_or_else(|| PathBuf::from("/data/local/tmp/diari"));
-    if let Some(text) = android::launch_quick_add(&app) {
-        set_launch_quick_add(text);
+    if let Some(launch) = android::launch_request(&app) {
+        set_launch(launch);
     }
+    android::set_app(&app);
     android::register_quick_add_shortcut(&app);
 
     let app_for_events = app.clone();
