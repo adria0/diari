@@ -34,12 +34,18 @@ cargo test
 
 # Android (one-time setup)
 rustup target add aarch64-linux-android x86_64-linux-android
-sdkmanager "ndk;27.2.12479018"
+sdkmanager "ndk;30.0.16248370" "build-tools;35.0.0"
 cargo install cargo-apk
-export ANDROID_HOME=~/Library/Android/sdk
-export ANDROID_NDK_ROOT=$ANDROID_HOME/ndk/27.2.12479018
 
-cargo apk run --lib --release                                 # device (aarch64)
-cargo apk run --lib --release --target x86_64-linux-android   # emulator
+scripts/android.sh build                                   # -> target/release/apk/perb.apk
+scripts/android.sh run                                     # install + launch on device
+TARGET=x86_64-linux-android scripts/android.sh run         # x86_64 emulator
 adb logcat -s perb
 ```
+
+### Android build notes
+`scripts/android.sh` sets up everything the cross-build needs:
+- **NDK r30 or newer.** Slint's Skia renderer ships prebuilt binaries made with NDK r30's toolchain, and they need its libc++. `build.rs` links that libc++ statically.
+- **Newest installed build-tools.** The `d8` in build-tools 34 crashes on Slint's Java helper.
+- **`llvm-ranlib` for vendored OpenSSL.**
+- **Debug-keystore signing**, unless `CARGO_APK_RELEASE_KEYSTORE` is set.
