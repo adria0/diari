@@ -3,8 +3,8 @@
 
 use git2::build::CheckoutBuilder;
 use git2::{
-    Commit, ErrorCode, FetchOptions, IndexAddOption, IndexEntry, Oid, PushOptions, RemoteCallbacks,
-    Repository, RepositoryInitOptions, Signature,
+    Commit, Delta, DiffFindOptions, ErrorCode, FetchOptions, IndexAddOption, IndexEntry, Oid, PushOptions,
+    RemoteCallbacks, Repository, RepositoryInitOptions, Signature, Tree,
 };
 use std::cell::RefCell;
 use std::path::Path;
@@ -40,7 +40,7 @@ pub fn sync(p: &Params) -> Result<Outcome, git2::Error> {
 
     if p.remote_url.is_empty() {
         let _g = p.fs_lock.lock().unwrap();
-        commit_all(&repo, p, "")?;
+        commit_all(&repo, p)?;
         return Ok(out);
     }
 
@@ -49,7 +49,7 @@ pub fn sync(p: &Params) -> Result<Outcome, git2::Error> {
         let remote_oid = remote_tip(&repo, p.branch);
         {
             let _g = p.fs_lock.lock().unwrap();
-            commit_all(&repo, p, "")?;
+            commit_all(&repo, p)?;
             integrate(&repo, p, remote_oid, &mut out)?;
         }
         let local_oid = local_tip(&repo, p.branch);
@@ -128,8 +128,155 @@ fn timestamp() -> String {
     chrono::Local::now().format("%Y-%m-%d %H:%M:%S").to_string()
 }
 
+/// Files that differ between two trees, for commit messages.
+#[derive(Debug, Default, PartialEq)]
+struct Changes {
+    added: Vec<String>,
+    edited: Vec<String>,
+    deleted: Vec<String>,
+    renamed: Vec<(String, String)>,
+}
+
+impl Changes {
+    fn len(&self) -> usize {
+        self.added.len() + self.edited.len() + self.deleted.len() + self.renamed.len()
+    }
+}
+
+fn summarize(repo: &Repository, old: Option<&Tree>, new: &Tree) -> Result<Changes, git2::Error> {
+    let mut diff = repo.diff_tree_to_tree(old, Some(new), None)?;
+    diff.find_similar(Some(DiffFindOptions::new().renames(true)))?;
+    let mut c = Changes::default();
+    let path = |f: git2::DiffFile| f.path().map(|p| p.to_string_lossy().replace('\\', "/")).unwrap_or_default();
+    for d in diff.deltas() {
+        match d.status() {
+            Delta::Added | Delta::Copied => c.added.push(path(d.new_file())),
+            Delta::Deleted => c.deleted.push(path(d.old_file())),
+            Delta::Renamed => c.renamed.push((path(d.old_file()), path(d.new_file()))),
+            Delta::Modified | Delta::Typechange => c.edited.push(path(d.new_file())),
+            _ => {}
+        }
+    }
+    Ok(c)
+}
+
+const SUBJECT_MAX: usize = 72;
+const SUBJECT_MAX_ITEMS: usize = 3;
+
+/// Subject names the changed files (or counts them); body lists every file,
+/// then any `extra` lines, then device and time.
+fn format_message(c: &Changes, prefix: Option<&str>, extra: &[String], device: &str, time: &str) -> String {
+    let mut items: Vec<String> = Vec::new();
+    items.extend(c.added.iter().map(|f| format!("add {f}")));
+    items.extend(c.edited.iter().map(|f| format!("edit {f}")));
+    items.extend(c.deleted.iter().map(|f| format!("delete {f}")));
+    items.extend(c.renamed.iter().map(|(a, b)| format!("rename {a} -> {b}")));
+
+    let summary = if items.is_empty() {
+        None
+    } else {
+        let listed = items.join(", ");
+        let fits = items.len() <= SUBJECT_MAX_ITEMS
+            && listed.len() + prefix.map_or(0, |p| p.len() + 2) <= SUBJECT_MAX;
+        Some(if fits {
+            listed
+        } else if c.len() == 1 {
+            items[0].clone()
+        } else {
+            format!("update {} notes", c.len())
+        })
+    };
+    let subject = match (prefix, summary) {
+        (Some(p), Some(s)) => format!("{p}: {s}"),
+        (Some(p), None) => p.to_string(),
+        (None, Some(s)) => capitalize(&s),
+        (None, None) => format!("Sync from {device}"),
+    };
+
+    let mut body: Vec<String> = Vec::new();
+    body.extend(c.added.iter().map(|f| format!("Added: {f}")));
+    body.extend(c.edited.iter().map(|f| format!("Edited: {f}")));
+    body.extend(c.deleted.iter().map(|f| format!("Deleted: {f}")));
+    body.extend(c.renamed.iter().map(|(a, b)| format!("Renamed: {a} -> {b}")));
+    body.extend(extra.iter().cloned());
+
+    let mut msg = subject;
+    msg.push_str("\n\n");
+    if !body.is_empty() {
+        msg.push_str(&body.join("\n"));
+        msg.push_str("\n\n");
+    }
+    msg.push_str(&format!("Device: {device}\nTime: {time}\n"));
+    msg
+}
+
+fn capitalize(s: &str) -> String {
+    let mut ch = s.chars();
+    match ch.next() {
+        Some(f) => f.to_uppercase().chain(ch).collect(),
+        None => String::new(),
+    }
+}
+
+/// One committed version of a note.
+#[derive(Debug, Clone)]
+pub struct Version {
+    pub id: String,
+    pub short: String,
+    pub time: String,
+    pub summary: String,
+    pub author: String,
+}
+
+fn blob_at(commit: &Commit, rel: &str) -> Option<Oid> {
+    commit.tree().ok()?.get_path(Path::new(rel)).ok().map(|e| e.id())
+}
+
+/// Commits that changed `rel`, newest first. Walks first parents from HEAD
+/// and stops where the file first appears. Empty if there's no repo yet.
+pub fn file_history(dir: &Path, rel: &str, limit: usize) -> Result<Vec<Version>, git2::Error> {
+    let Ok(repo) = Repository::open(dir) else { return Ok(Vec::new()) };
+    let Ok(mut commit) = repo.head().and_then(|h| h.peel_to_commit()) else { return Ok(Vec::new()) };
+    let mut out = Vec::new();
+    loop {
+        let Some(blob) = blob_at(&commit, rel) else { break };
+        let parent = commit.parent(0).ok();
+        let parent_blob = parent.as_ref().and_then(|p| blob_at(p, rel));
+        if parent_blob != Some(blob) {
+            let when = chrono::DateTime::from_timestamp(commit.time().seconds(), 0)
+                .map(|t| t.with_timezone(&chrono::Local).format("%Y-%m-%d %H:%M").to_string())
+                .unwrap_or_default();
+            let id = commit.id().to_string();
+            out.push(Version {
+                short: id[..7].to_string(),
+                id,
+                time: when,
+                summary: commit.summary().ok().flatten().unwrap_or_default().to_string(),
+                author: commit.author().name().unwrap_or_default().to_string(),
+            });
+            if out.len() >= limit {
+                break;
+            }
+        }
+        match parent {
+            Some(p) if parent_blob.is_some() => commit = p,
+            _ => break,
+        }
+    }
+    Ok(out)
+}
+
+/// Contents of `rel` at `commit_id`, or `None` if it didn't exist there.
+pub fn file_at(dir: &Path, commit_id: &str, rel: &str) -> Result<Option<String>, git2::Error> {
+    let repo = Repository::open(dir)?;
+    let commit = repo.find_commit(Oid::from_str(commit_id)?)?;
+    let Some(id) = blob_at(&commit, rel) else { return Ok(None) };
+    let blob = repo.find_blob(id)?;
+    Ok(Some(String::from_utf8_lossy(blob.content()).into_owned()))
+}
+
 /// Stage everything (except hidden files) and commit if the tree changed.
-fn commit_all(repo: &Repository, p: &Params, _why: &str) -> Result<bool, git2::Error> {
+fn commit_all(repo: &Repository, p: &Params) -> Result<bool, git2::Error> {
     let mut index = repo.index()?;
     let mut skip_hidden = |path: &Path, _: &[u8]| -> i32 {
         let hidden = path.components().any(|c| {
@@ -152,9 +299,11 @@ fn commit_all(repo: &Repository, p: &Params, _why: &str) -> Result<bool, git2::E
     }
     let sig = signature(p)?;
     let parents: Vec<&Commit> = head.iter().collect();
-    let msg = format!("perb: {} {}", p.device, timestamp());
+    let old_tree = head.as_ref().map(|h| h.tree()).transpose()?;
+    let changes = summarize(repo, old_tree.as_ref(), &tree)?;
+    let msg = format_message(&changes, None, &[], p.device, &timestamp());
     repo.commit(Some(&refname), &sig, &sig, &msg, &tree, &parents)?;
-    log::info!("committed local changes");
+    log::info!("committed: {}", msg.lines().next().unwrap_or_default());
     Ok(true)
 }
 
@@ -227,7 +376,10 @@ fn integrate(repo: &Repository, p: &Params, remote: Option<Oid>, out: &mut Outco
     let tree_id = idx.write_tree_to(repo)?;
     let tree = repo.find_tree(tree_id)?;
     let sig = signature(p)?;
-    let msg = format!("perb: merge from {} {}", p.device, timestamp());
+    let changes = summarize(repo, Some(&remote_c.tree()?), &tree)?;
+    let extra: Vec<String> = out.conflicts.iter().map(|c| format!("Conflict copy: {c}")).collect();
+    let prefix = format!("Merge local changes from {}", p.device);
+    let msg = format_message(&changes, Some(&prefix), &extra, p.device, &timestamp());
     let merged = repo.commit(None, &sig, &sig, &msg, &tree, &[&remote_c])?;
     move_to(repo, p.branch, merged)?;
     out.workdir_changed = true;
@@ -337,6 +489,65 @@ mod tests {
         sync_dev(&d, "");
         let repo = Repository::open(&d.dir).unwrap();
         assert!(local_tip(&repo, "main").is_some());
+        let head = repo.head().unwrap().peel_to_commit().unwrap();
+        assert_eq!(head.summary().unwrap(), Some("Add a.md"));
+        assert!(head.message().unwrap().contains("Added: a.md\n"));
+    }
+
+    #[test]
+    fn message_format() {
+        let s = |v: &[&str]| v.iter().map(|x| x.to_string()).collect::<Vec<_>>();
+        let one = Changes { edited: s(&["2026_11_26.md"]), ..Default::default() };
+        assert_eq!(
+            format_message(&one, None, &[], "mac", "T"),
+            "Edit 2026_11_26.md\n\nEdited: 2026_11_26.md\n\nDevice: mac\nTime: T\n"
+        );
+
+        let mix = Changes {
+            added: s(&["todo.md"]),
+            edited: s(&["a.md"]),
+            deleted: s(&["old.md"]),
+            renamed: vec![],
+        };
+        let m = format_message(&mix, None, &[], "mac", "T");
+        assert!(m.starts_with("Add todo.md, edit a.md, delete old.md\n\nAdded: todo.md\nEdited: a.md\nDeleted: old.md\n"));
+
+        let many = Changes { edited: s(&["a.md", "b.md", "c.md", "d.md"]), ..Default::default() };
+        assert!(format_message(&many, None, &[], "mac", "T").starts_with("Update 4 notes\n"));
+
+        let ren = Changes { renamed: vec![("a.md".into(), "w/a.md".into())], ..Default::default() };
+        assert!(format_message(&ren, None, &[], "mac", "T").starts_with("Rename a.md -> w/a.md\n\nRenamed: a.md -> w/a.md\n"));
+
+        let none = Changes::default();
+        assert_eq!(format_message(&none, None, &[], "mac", "T"), "Sync from mac\n\nDevice: mac\nTime: T\n");
+
+        let merged = format_message(&one, Some("Merge local changes from mac"), &s(&["Conflict copy: x.md"]), "mac", "T");
+        assert!(merged.starts_with("Merge local changes from mac: edit 2026_11_26.md\n\nEdited: 2026_11_26.md\nConflict copy: x.md\n"));
+    }
+
+    #[test]
+    fn history_and_file_at() {
+        let tmp = tempfile::tempdir().unwrap();
+        let d = Dev { dir: tmp.path().join("n"), name: "x" };
+        fs::create_dir_all(&d.dir).unwrap();
+        assert!(file_history(&d.dir, "n.md", 10).unwrap().is_empty());
+        for (i, other) in [(1, false), (2, true), (3, false)] {
+            fs::write(d.dir.join("n.md"), format!("v{i}")).unwrap();
+            sync_dev(&d, "");
+            if other {
+                fs::write(d.dir.join("other.md"), format!("o{i}")).unwrap();
+                sync_dev(&d, "");
+            }
+        }
+        let h = file_history(&d.dir, "n.md", 10).unwrap();
+        assert_eq!(h.len(), 3);
+        assert_eq!(h[0].summary, "Edit n.md");
+        assert_eq!(h[2].summary, "Add n.md");
+        let texts: Vec<_> = h.iter().map(|v| file_at(&d.dir, &v.id, "n.md").unwrap().unwrap()).collect();
+        assert_eq!(texts, vec!["v3", "v2", "v1"]);
+        assert_eq!(file_at(&d.dir, &h[2].id, "other.md").unwrap(), None);
+        assert!(file_history(&d.dir, "missing.md", 10).unwrap().is_empty());
+        assert_eq!(file_history(&d.dir, "n.md", 2).unwrap().len(), 2);
     }
 
     #[test]
@@ -408,6 +619,11 @@ mod tests {
         assert!(copy.starts_with("sub/n.conflict-phone-") && copy.ends_with(".md"), "{copy}");
         assert_eq!(read(&b, "sub/n.md"), "from mac\n");
         assert_eq!(read(&b, copy), "from phone\n");
+        let repo_b = Repository::open(&b.dir).unwrap();
+        let head = repo_b.head().unwrap().peel_to_commit().unwrap();
+        let msg = head.message().unwrap().to_string();
+        assert!(msg.starts_with("Merge local changes from phone"), "{msg}");
+        assert!(msg.contains(&format!("Conflict copy: {copy}\n")), "{msg}");
 
         sync_dev(&a, &url);
         assert_eq!(read(&a, "sub/n.md"), "from mac\n");

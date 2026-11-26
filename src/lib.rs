@@ -17,6 +17,7 @@ use sync::{Report, Shared, SyncEngine};
 
 const AUTOSAVE_DELAY: Duration = Duration::from_secs(1);
 const SYNC_AFTER_SAVE_DELAY: Duration = Duration::from_secs(5);
+const HISTORY_LIMIT: usize = 200;
 
 /// Per-note editor state that isn't mirrored in the UI.
 #[derive(Default)]
@@ -31,6 +32,8 @@ struct App {
     shared: Arc<Shared>,
     engine: SyncEngine,
     editor: RefCell<EditorState>,
+    /// Versions shown in the history view of the open note.
+    history: RefCell<Vec<sync::git::Version>>,
     save_timer: Timer,
     sync_timer: Timer,
     message_timer: Timer,
@@ -135,6 +138,7 @@ impl App {
                 ui.set_current_path(path.into());
                 ui.set_dirty(false);
                 ui.set_preview(false);
+                self.close_history();
             }
             Err(e) => self.show_message(format!("Could not open {path}: {e}"), 6),
         }
@@ -147,6 +151,72 @@ impl App {
         ui.set_editor_text(SharedString::new());
         ui.set_dirty(false);
         ui.set_preview(false);
+        self.close_history();
+    }
+
+    fn open_history(self: &Rc<Self>) {
+        self.save_now();
+        let Some(path) = self.editor.borrow().path.clone() else { return };
+        let versions = match sync::git::file_history(&self.shared.notes_dir, &path, HISTORY_LIMIT) {
+            Ok(v) => v,
+            Err(e) => {
+                self.show_message(format!("Could not read history: {}", e.message()), 6);
+                return;
+            }
+        };
+        let Some(newest) = versions.first().map(|v| v.id.clone()) else {
+            self.show_message("No history yet — sync hasn't committed this note", 6);
+            return;
+        };
+        let items: Vec<VersionItem> = versions
+            .iter()
+            .map(|v| VersionItem {
+                id: v.id.clone().into(),
+                title: v.time.clone().into(),
+                subtitle: format!("{} · {}", v.summary, v.short).into(),
+            })
+            .collect();
+        *self.history.borrow_mut() = versions;
+        let ui = self.ui();
+        ui.set_versions(ModelRc::new(VecModel::from(items)));
+        ui.set_show_history(true);
+        self.select_version(&newest);
+    }
+
+    fn select_version(self: &Rc<Self>, id: &str) {
+        let Some(path) = self.editor.borrow().path.clone() else { return };
+        let ui = self.ui();
+        ui.set_history_selected(id.into());
+        let text = match sync::git::file_at(&self.shared.notes_dir, id, &path) {
+            Ok(Some(t)) => t,
+            Ok(None) => "(file did not exist in this version)".to_string(),
+            Err(e) => format!("(could not read this version: {})", e.message()),
+        };
+        ui.set_history_text(text.into());
+    }
+
+    fn restore_version(self: &Rc<Self>) {
+        let ui = self.ui();
+        let id = ui.get_history_selected().to_string();
+        let Some(path) = self.editor.borrow().path.clone() else { return };
+        let Ok(Some(text)) = sync::git::file_at(&self.shared.notes_dir, &id, &path) else {
+            self.show_message("Could not restore this version", 6);
+            return;
+        };
+        let when = self.history.borrow().iter().find(|v| v.id == id).map(|v| v.time.clone()).unwrap_or_default();
+        self.close_history();
+        ui.set_editor_text(text.into());
+        ui.invoke_text_edited(ui.get_editor_text());
+        self.show_message(format!("Restored version from {when}"), 6);
+    }
+
+    fn close_history(&self) {
+        self.history.borrow_mut().clear();
+        let ui = self.ui();
+        ui.set_show_history(false);
+        ui.set_versions(ModelRc::default());
+        ui.set_history_selected(SharedString::new());
+        ui.set_history_text(SharedString::new());
     }
 
     fn update_preview(&self) {
@@ -312,6 +382,7 @@ pub fn run(
         shared,
         engine,
         editor: RefCell::default(),
+        history: RefCell::default(),
         save_timer: Timer::default(),
         sync_timer: Timer::default(),
         message_timer: Timer::default(),
@@ -334,6 +405,21 @@ pub fn run(
             }
         })
     });
+    ui.on_open_today(|| {
+        with_app(|a| {
+            let res = {
+                let _g = a.shared.fs_lock.lock().unwrap();
+                notes::today(&a.shared.notes_dir, chrono::Local::now().date_naive())
+            };
+            match res {
+                Ok(rel) => {
+                    a.refresh_list();
+                    a.open(&rel);
+                }
+                Err(e) => a.show_message(format!("Could not open today's note: {e}"), 6),
+            }
+        })
+    });
     ui.on_rename_note(|name| {
         with_app(|a| {
             a.save_now();
@@ -346,6 +432,7 @@ pub fn run(
                 Ok(new) => {
                     a.editor.borrow_mut().path = Some(new.clone());
                     a.ui().set_current_path(new.into());
+                    a.close_history();
                     a.refresh_list();
                     a.engine.request();
                 }
@@ -398,6 +485,10 @@ pub fn run(
             ui.set_preview(on);
         })
     });
+    ui.on_open_history(|| with_app(|a| a.open_history()));
+    ui.on_select_version(|id| with_app(|a| a.select_version(&id)));
+    ui.on_restore_version(|| with_app(|a| a.restore_version()));
+    ui.on_close_history(|| with_app(|a| a.close_history()));
     ui.on_back(|| {
         with_app(|a| {
             a.save_now();

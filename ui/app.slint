@@ -6,6 +6,12 @@ export struct NoteItem {
     subtitle: string,
 }
 
+export struct VersionItem {
+    id: string,
+    title: string,
+    subtitle: string,
+}
+
 // kind: 0 paragraph, 1-6 heading, 7 code, 8 quote, 9 list item, 10 rule
 export struct MdBlock {
     kind: int,
@@ -58,6 +64,7 @@ component ListPane inherits Rectangle {
     in property <string> default-new-name;
     callback open(string);
     callback create(string);
+    callback today();
     callback sync-now();
     callback settings();
     callback filter-edited(string);
@@ -96,6 +103,11 @@ component ListPane inherits Rectangle {
                     text: root.status-text;
                     clicked => { root.sync-now(); }
                 }
+            }
+            Button {
+                text: "Today";
+                primary: true;
+                clicked => { root.today(); }
             }
             Button {
                 text: "Settings";
@@ -196,6 +208,109 @@ component PreviewView inherits Rectangle {
     }
 }
 
+component VersionList inherits ListView {
+    in property <[VersionItem]> versions;
+    in property <string> selected;
+    callback select(string);
+
+    for v in root.versions: Rectangle {
+        height: 50px;
+        border-radius: 6px;
+        background: v.id == root.selected ? Palette.selection-background.with-alpha(0.35)
+            : vta.has-hover ? Palette.foreground.with-alpha(0.06) : transparent;
+        vta := TouchArea {
+            clicked => { root.select(v.id); }
+        }
+        VerticalLayout {
+            padding-left: 10px;
+            padding-right: 10px;
+            alignment: center;
+            Text {
+                text: v.title;
+                font-size: 13px;
+                font-weight: 600;
+                color: Palette.foreground;
+                overflow: elide;
+            }
+            Text {
+                text: v.subtitle;
+                font-size: 11px;
+                color: Palette.foreground.with-alpha(0.6);
+                overflow: elide;
+            }
+        }
+    }
+}
+
+component VersionText inherits TextEdit {
+    read-only: true;
+    wrap: word-wrap;
+    font-family: "monospace";
+    font-size: 14px;
+}
+
+component HistoryPane inherits VerticalLayout {
+    in property <[VersionItem]> versions;
+    in property <string> selected;
+    in property <string> text;
+    callback select(string);
+    callback restore();
+    callback close();
+
+    in property <bool> side-by-side;
+
+    spacing: 8px;
+    HorizontalLayout {
+        spacing: 8px;
+        Text {
+            text: "History · \{root.versions.length} version(s)";
+            font-size: 14px;
+            font-weight: 600;
+            vertical-alignment: center;
+            color: Palette.foreground;
+            horizontal-stretch: 1;
+        }
+        Button {
+            text: "Restore this version";
+            primary: true;
+            enabled: root.selected != "";
+            clicked => { root.restore(); }
+        }
+        Button {
+            text: "Close";
+            clicked => { root.close(); }
+        }
+    }
+    if root.side-by-side: HorizontalLayout {
+        vertical-stretch: 1;
+        spacing: 8px;
+        VersionList {
+            width: 260px;
+            versions: root.versions;
+            selected: root.selected;
+            select(id) => { root.select(id); }
+        }
+        VersionText {
+            horizontal-stretch: 1;
+            text: root.text;
+        }
+    }
+    if !root.side-by-side: VerticalLayout {
+        vertical-stretch: 1;
+        spacing: 8px;
+        VersionList {
+            height: 180px;
+            versions: root.versions;
+            selected: root.selected;
+            select(id) => { root.select(id); }
+        }
+        VersionText {
+            vertical-stretch: 1;
+            text: root.text;
+        }
+    }
+}
+
 component EditorPane inherits Rectangle {
     in property <string> path;
     in property <bool> dirty;
@@ -203,8 +318,17 @@ component EditorPane inherits Rectangle {
     in property <[MdBlock]> blocks;
     in-out property <bool> preview;
     in-out property <string> text;
+    in property <bool> show-history;
+    in property <[VersionItem]> versions;
+    in property <string> history-selected;
+    in property <string> history-text;
+    in property <bool> history-side-by-side;
     callback edited(string);
     callback toggle-preview();
+    callback open-history();
+    callback select-version(string);
+    callback restore-version();
+    callback close-history();
     callback back();
     callback delete();
     callback rename(string);
@@ -222,12 +346,13 @@ component EditorPane inherits Rectangle {
         HorizontalLayout {
             spacing: 8px;
             if root.show-back: Button {
-                text: "‹ Back";
+                text: "‹";
                 clicked => { root.back(); }
             }
             name := LineEdit {
                 text: root.path;
                 horizontal-stretch: 1;
+                min-width: 40px;
                 accepted(t) => { root.rename(t); }
             }
             VerticalLayout {
@@ -240,7 +365,13 @@ component EditorPane inherits Rectangle {
             }
             Button {
                 text: root.preview ? "Edit" : "Preview";
+                enabled: !root.show-history;
                 clicked => { root.toggle-preview(); }
+            }
+            Button {
+                text: "History";
+                enabled: !root.show-history;
+                clicked => { root.open-history(); }
             }
             Button {
                 text: root.confirm-delete ? "Really?" : "Delete";
@@ -254,7 +385,17 @@ component EditorPane inherits Rectangle {
                 }
             }
         }
-        if !root.preview: TextEdit {
+        if root.show-history: HistoryPane {
+            vertical-stretch: 1;
+            versions: root.versions;
+            selected: root.history-selected;
+            text: root.history-text;
+            side-by-side: root.history-side-by-side;
+            select(id) => { root.select-version(id); }
+            restore => { root.restore-version(); }
+            close => { root.close-history(); }
+        }
+        if !root.show-history && !root.preview: TextEdit {
             vertical-stretch: 1;
             text <=> root.text;
             wrap: word-wrap;
@@ -262,7 +403,7 @@ component EditorPane inherits Rectangle {
             font-size: 14px;
             edited(t) => { root.edited(t); }
         }
-        if root.preview: PreviewView {
+        if !root.show-history && root.preview: PreviewView {
             vertical-stretch: 1;
             blocks: root.blocks;
         }
@@ -413,6 +554,10 @@ export component AppWindow inherits Window {
     in-out property <bool> dirty;
     in-out property <bool> preview;
     in property <[MdBlock]> blocks;
+    in-out property <bool> show-history;
+    in property <[VersionItem]> versions;
+    in property <string> history-selected;
+    in property <string> history-text;
     in property <string> sync-text: "Starting…";
     in property <int> sync-state: 1;
     in property <string> message;
@@ -430,10 +575,15 @@ export component AppWindow inherits Window {
 
     callback open-note(string);
     callback new-note(string);
+    callback open-today();
     callback rename-note(string);
     callback delete-note();
     callback text-edited(string);
     callback preview-toggled();
+    callback open-history();
+    callback select-version(string);
+    callback restore-version();
+    callback close-history();
     callback sync-now();
     callback open-settings();
     callback save-settings();
@@ -476,6 +626,7 @@ export component AppWindow inherits Window {
                 default-new-name: root.default-new-name;
                 open(p) => { root.open-note(p); }
                 create(n) => { root.new-note(n); }
+                today => { root.open-today(); }
                 sync-now => { root.sync-now(); }
                 settings => { root.open-settings(); }
                 filter-edited(t) => { root.filter-edited(t); }
@@ -494,6 +645,15 @@ export component AppWindow inherits Window {
                 text <=> root.editor-text;
                 edited(t) => { root.text-edited(t); }
                 toggle-preview => { root.preview-toggled(); }
+                show-history: root.show-history;
+                versions: root.versions;
+                history-selected: root.history-selected;
+                history-text: root.history-text;
+                history-side-by-side: root.width >= 1000px;
+                open-history => { root.open-history(); }
+                select-version(id) => { root.select-version(id); }
+                restore-version => { root.restore-version(); }
+                close-history => { root.close-history(); }
                 back => { root.back(); }
                 delete => { root.delete-note(); }
                 rename(n) => { root.rename-note(n); }
