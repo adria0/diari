@@ -225,11 +225,11 @@ impl App {
         focus.is_some()
     }
 
-    /// Show the quick-add field, prefilled with `text`, and focus it.
+    /// Show the quick-add bar (hidden otherwise), prefilled with `text`.
     fn show_quick_add(&self, text: &str) {
         let ui = self.ui();
         ui.set_quick_text(text.into());
-        ui.set_quick_focus_seq(ui.get_quick_focus_seq() + 1);
+        ui.set_quick_visible(true);
     }
 
     /// Append `- HH:MM text` to today's note without opening it.
@@ -254,6 +254,7 @@ impl App {
                     }
                 }
                 self.ui().set_quick_text(SharedString::new());
+                self.ui().set_quick_visible(false);
                 self.refresh_list();
                 self.show_message(format!("Added to {rel}"), 4);
                 self.engine.request();

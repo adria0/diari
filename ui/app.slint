@@ -75,7 +75,9 @@ component ListPane inherits Rectangle {
     in-out property <string> filter;
     in property <string> default-new-name;
     in-out property <string> quick-text;
-    in property <int> quick-focus-seq;
+    // The quick-add bar is only shown when the app was opened to add a line
+    // (Android share or the "Quick add" shortcut).
+    in-out property <bool> quick-visible;
     callback quick-add(string);
     callback open(string);
     callback create(string);
@@ -95,10 +97,6 @@ component ListPane inherits Rectangle {
         if root.quick-text != "" {
             root.quick-add(root.quick-text);
         }
-    }
-
-    changed quick-focus-seq => {
-        quick.focus();
     }
 
     changed default-new-name => {
@@ -139,18 +137,26 @@ component ListPane inherits Rectangle {
                 clicked => { root.settings(); }
             }
         }
-        HorizontalLayout {
+        if root.quick-visible: HorizontalLayout {
             spacing: 8px;
-            quick := LineEdit {
+            LineEdit {
                 placeholder-text: "Add a line to today…";
                 text <=> root.quick-text;
                 accepted => { root.do-quick-add(); }
+                init => { self.focus(); }
             }
             Button {
                 text: "Add";
                 primary: true;
                 enabled: root.quick-text != "";
                 clicked => { root.do-quick-add(); }
+            }
+            Button {
+                text: "Cancel";
+                clicked => {
+                    root.quick-text = "";
+                    root.quick-visible = false;
+                }
             }
         }
         LineEdit {
@@ -795,7 +801,7 @@ export component AppWindow inherits Window {
     callback ed-join-up(int);
     callback ed-delete-at(int, int) -> bool;
     in-out property <string> quick-text;
-    in-out property <int> quick-focus-seq;
+    in-out property <bool> quick-visible;
     callback quick-add(string);
     in property <string> sync-text: "Starting…";
     in property <int> sync-state: 1;
@@ -864,7 +870,7 @@ export component AppWindow inherits Window {
                 filter <=> root.filter;
                 default-new-name: root.default-new-name;
                 quick-text <=> root.quick-text;
-                quick-focus-seq: root.quick-focus-seq;
+                quick-visible <=> root.quick-visible;
                 quick-add(t) => { root.quick-add(t); }
                 open(p) => { root.open-note(p); }
                 create(n) => { root.new-note(n); }
