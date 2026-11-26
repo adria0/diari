@@ -409,6 +409,12 @@ fn integrate(repo: &Repository, p: &Params, remote: Option<Oid>, out: &mut Outco
             let path = String::from_utf8_lossy(&path_bytes).into_owned();
             idx.conflict_remove(Path::new(&path))?;
             match (c.our, c.their) {
+                // Local is just the empty template of a new note (e.g. today's
+                // note made before this device ever synced): take the remote.
+                (Some(ours), Some(theirs)) if is_blank_note(repo, &path, ours.id) => {
+                    log::info!("{path}: local copy was an empty new note; keeping the remote one");
+                    add_stage0(&mut idx, theirs, path_bytes)?;
+                }
                 (Some(ours), Some(theirs)) => {
                     // Remote wins the original name; local copy is kept aside.
                     let copy = conflict_name(&path, p.device, &stamp);
@@ -443,6 +449,17 @@ fn add_stage0(idx: &mut git2::Index, mut e: IndexEntry, path: Vec<u8>) -> Result
     e.flags_extended = 0;
     e.path = path;
     idx.add(&e)
+}
+
+/// Is this blob a note with no content beyond its "# title" heading (what
+/// `notes::create` writes)?
+fn is_blank_note(repo: &Repository, path: &str, id: Oid) -> bool {
+    let Ok(blob) = repo.find_blob(id) else { return false };
+    let Ok(text) = std::str::from_utf8(blob.content()) else { return false };
+    let file = path.rsplit('/').next().unwrap_or(path);
+    let stem = file.strip_suffix(".md").unwrap_or(file);
+    let text = text.trim();
+    text.is_empty() || text == format!("# {stem}")
 }
 
 /// `notes/todo.md` -> `notes/todo.conflict-<device>-<stamp>.md`
@@ -717,6 +734,21 @@ mod tests {
         assert_eq!(read(&b, "x.md"), "a");
         assert_eq!(read(&b, &o.conflicts[0]), "b's x");
         assert_eq!(read(&b, "y.md"), "b");
+    }
+
+    #[test]
+    fn blank_new_note_takes_remote_without_conflict() {
+        let (_t, url, a, b) = setup();
+        fs::create_dir_all(&a.dir).unwrap();
+        fs::write(a.dir.join("2026_11_27.md"), "# 2026_11_27\n\nreal text\n").unwrap();
+        sync_dev(&a, &url);
+        // A new device made today's (empty) note before its first sync.
+        fs::create_dir_all(&b.dir).unwrap();
+        fs::write(b.dir.join("2026_11_27.md"), "# 2026_11_27\n\n").unwrap();
+        sync_dev(&b, "");
+        let o = sync_dev(&b, &url);
+        assert!(o.conflicts.is_empty(), "{:?}", o.conflicts);
+        assert_eq!(read(&b, "2026_11_27.md"), "# 2026_11_27\n\nreal text\n");
     }
 
     #[test]
