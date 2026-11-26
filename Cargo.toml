@@ -40,6 +40,8 @@ tempfile = "3"
 [package.metadata.android]
 package = "dev.perb.app"
 build_targets = ["aarch64-linux-android"]
+# App icon ("D"), generated from icons/*.svg by scripts/icons.sh.
+resources = "android/res"
 
 [package.metadata.android.sdk]
 min_sdk_version = 26
@@ -50,6 +52,7 @@ name = "android.permission.INTERNET"
 
 [package.metadata.android.application]
 label = "perb"
+icon = "@mipmap/ic_launcher"
 
 # Appear in Android's share menu for text (links, selections): the shared text
 # opens perb's quick-add field. The MAIN/LAUNCHER filter is added by cargo-apk.

@@ -106,6 +106,33 @@ pub fn register_quick_add_shortcut(app: &AndroidApp) {
             "(Landroid/content/Intent;)Landroid/content/pm/ShortcutInfo$Builder;",
             &[JValue::Object(&intent)],
         )?;
+        // The app icon ("D") as the shortcut's icon.
+        let res = env.call_method(activity, "getResources", "()Landroid/content/res/Resources;", &[])?.l()?;
+        let (name, kind, pkg) = (env.new_string("ic_launcher")?, env.new_string("mipmap")?, env.new_string("dev.perb.app")?);
+        let icon_id = env
+            .call_method(
+                &res,
+                "getIdentifier",
+                "(Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;)I",
+                &[JValue::Object(&name), JValue::Object(&kind), JValue::Object(&pkg)],
+            )?
+            .i()?;
+        if icon_id != 0 {
+            let icon = env
+                .call_static_method(
+                    "android/graphics/drawable/Icon",
+                    "createWithResource",
+                    "(Landroid/content/Context;I)Landroid/graphics/drawable/Icon;",
+                    &[JValue::Object(activity), JValue::Int(icon_id)],
+                )?
+                .l()?;
+            env.call_method(
+                &builder,
+                "setIcon",
+                "(Landroid/graphics/drawable/Icon;)Landroid/content/pm/ShortcutInfo$Builder;",
+                &[JValue::Object(&icon)],
+            )?;
+        }
         let info = env.call_method(&builder, "build", "()Landroid/content/pm/ShortcutInfo;", &[])?.l()?;
 
         let list = env

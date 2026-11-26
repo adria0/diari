@@ -1,0 +1,9 @@
+<!-- perb icon foreground: a white "D" inside the 66x66 adaptive-icon safe zone
+     of a 108x108 canvas. Transparent background (Android adds the backdrop). -->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 108 108" width="108" height="108">
+  <g transform="translate(54 54) scale(1.1) translate(-54 -54)">
+  <path fill="#FFFFFF" fill-rule="evenodd"
+        d="M38,31 H54 A19,23 0 0 1 54,77 H38 Z
+           M47.5,40.5 H54 A9.5,13.5 0 0 1 54,67.5 H47.5 Z"/>
+  </g>
+</svg>
