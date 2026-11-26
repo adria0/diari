@@ -191,7 +191,8 @@ pub fn parse(src: &str) -> Vec<Block> {
                 s.ensure_open();
                 s.buf.push_str(&t);
             }
-            Event::SoftBreak => s.buf.push(' '),
+            // Show line breaks as written (a diary, not a typeset document).
+            Event::SoftBreak => s.buf.push('\n'),
             Event::HardBreak => s.buf.push('\n'),
             Event::Rule => {
                 s.flush();
@@ -226,7 +227,7 @@ mod tests {
             got,
             vec![
                 (Kind::Heading(1), "Title".into(), 0),
-                (Kind::Para, "Some em and code next line.".into(), 0),
+                (Kind::Para, "Some em and code\nnext line.".into(), 0),
                 (Kind::ListItem, "• a".into(), 0),
                 (Kind::ListItem, "• b".into(), 0),
                 (Kind::ListItem, "• c".into(), 1),
@@ -254,6 +255,19 @@ mod tests {
                 (Kind::Para, "see  and site".into(), "".into()),
                 (Kind::Link, "a.png".into(), "a.png".into()),
                 (Kind::Link, "site".into(), "https://x.y".into()),
+            ]
+        );
+    }
+
+    #[test]
+    fn multi_line_entry_stays_one_item() {
+        let got = kinds("- 09:05 Title\n  line two\n\n  - item\n- 10:00 next\n");
+        assert_eq!(
+            got,
+            vec![
+                (Kind::ListItem, "• 09:05 Title\nline two".into(), 0),
+                (Kind::ListItem, "• item".into(), 1),
+                (Kind::ListItem, "• 10:00 next".into(), 0),
             ]
         );
     }

@@ -266,10 +266,23 @@ pub fn append_line(dir: &Path, rel: &str, line: &str) -> io::Result<()> {
     write(dir, rel, &text)
 }
 
-/// A quick-add entry: `- HH:MM text`, on one line.
+/// A quick-add entry: `- HH:MM text`. Multi-line text (a shared Keep note,
+/// say) keeps its lines: the first goes after the time, the rest are
+/// indented below it so they stay part of the same list item.
 pub fn quick_line(time: chrono::NaiveTime, text: &str) -> String {
-    let text = text.split_whitespace().collect::<Vec<_>>().join(" ");
-    format!("- {} {text}", time.format("%H:%M"))
+    let lines: Vec<&str> = text.lines().map(str::trim_end).collect();
+    let first = lines.iter().position(|l| !l.trim().is_empty()).unwrap_or(lines.len());
+    let last = lines.iter().rposition(|l| !l.trim().is_empty()).map_or(first, |i| i + 1);
+    let body = &lines[first..last];
+    let mut out = format!("- {} {}", time.format("%H:%M"), body.first().map_or("", |l| l.trim_start()));
+    for line in body.iter().skip(1) {
+        out.push('\n');
+        if !line.is_empty() {
+            out.push_str("  ");
+            out.push_str(line);
+        }
+    }
+    out
 }
 
 /// Write via temp file + rename so a crash never leaves a half-written note.
@@ -386,7 +399,11 @@ mod tests {
         let d = tmp.path();
         let day = chrono::NaiveDate::from_ymd_opt(2026, 3, 7).unwrap();
         let t = chrono::NaiveTime::from_hms_opt(9, 5, 0).unwrap();
-        assert_eq!(quick_line(t, "  read\nthis   link "), "- 09:05 read this link");
+        assert_eq!(quick_line(t, "  read this   link \n"), "- 09:05 read this   link");
+        assert_eq!(
+            quick_line(t, "\nTitle\nline two\n\n- item\n\n"),
+            "- 09:05 Title\n  line two\n\n  - item"
+        );
         assert_eq!(append_to_today(d, day, "- 09:05 a").unwrap(), "2026_03_07.md");
         assert_eq!(read(d, "2026_03_07.md").unwrap(), "# 2026_03_07\n\n- 09:05 a\n");
         write(d, "2026_03_07.md", "no newline").unwrap();
