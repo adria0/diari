@@ -92,6 +92,9 @@ impl App {
             })
             .collect();
         ui.set_notes(ModelRc::new(VecModel::from(items)));
+        ui.set_default_new_name(
+            notes::default_new_name(&self.shared.notes_dir, chrono::Local::now().date_naive()).into(),
+        );
     }
 
     fn save_now(&self) {

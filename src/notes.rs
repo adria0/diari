@@ -146,6 +146,17 @@ pub fn create(dir: &Path, name: &str) -> io::Result<String> {
     Ok(candidate)
 }
 
+/// Default name for a new note: today's date as `yyyy_mm_dd`, or empty if
+/// `yyyy_mm_dd.md` already exists in the notes folder.
+pub fn default_new_name(dir: &Path, today: chrono::NaiveDate) -> String {
+    let name = today.format("%Y_%m_%d").to_string();
+    if dir.join(format!("{name}.md")).exists() {
+        String::new()
+    } else {
+        name
+    }
+}
+
 /// Write via temp file + rename so a crash never leaves a half-written note.
 pub fn atomic_write(path: &Path, data: &[u8]) -> io::Result<()> {
     let dir = path.parent().ok_or_else(|| io::Error::other("no parent dir"))?;
@@ -193,6 +204,16 @@ mod tests {
         assert!(rename(d, &r, "Hello 2").is_err());
         delete(d, &r).unwrap();
         assert_eq!(list(d).len(), 2);
+    }
+
+    #[test]
+    fn default_new_name_is_today_unless_taken() {
+        let tmp = tempfile::tempdir().unwrap();
+        let d = tmp.path();
+        let day = chrono::NaiveDate::from_ymd_opt(2026, 3, 7).unwrap();
+        assert_eq!(default_new_name(d, day), "2026_03_07");
+        create(d, &default_new_name(d, day)).unwrap();
+        assert_eq!(default_new_name(d, day), "");
     }
 
     #[test]

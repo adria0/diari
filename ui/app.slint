@@ -55,6 +55,7 @@ component ListPane inherits Rectangle {
     in property <string> status-text;
     in property <int> status-state;
     in-out property <string> filter;
+    in property <string> default-new-name;
     callback open(string);
     callback create(string);
     callback sync-now();
@@ -64,7 +65,13 @@ component ListPane inherits Rectangle {
     function do-create() {
         if new-name.text != "" {
             root.create(new-name.text);
-            new-name.text = "";
+            new-name.text = root.default-new-name;
+        }
+    }
+
+    changed default-new-name => {
+        if !new-name.has-focus {
+            new-name.text = root.default-new-name;
         }
     }
 
@@ -104,6 +111,7 @@ component ListPane inherits Rectangle {
             spacing: 8px;
             new-name := LineEdit {
                 placeholder-text: "New note name";
+                text: root.default-new-name;
                 accepted => { root.do-create(); }
             }
             Button {
@@ -399,6 +407,7 @@ export component AppWindow inherits Window {
 
     in property <[NoteItem]> notes;
     in-out property <string> filter;
+    in property <string> default-new-name;
     in-out property <string> current-path;
     in-out property <string> editor-text;
     in-out property <bool> dirty;
@@ -464,6 +473,7 @@ export component AppWindow inherits Window {
                 status-text: root.sync-text;
                 status-state: root.sync-state;
                 filter <=> root.filter;
+                default-new-name: root.default-new-name;
                 open(p) => { root.open-note(p); }
                 create(n) => { root.new-note(n); }
                 sync-now => { root.sync-now(); }
