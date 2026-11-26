@@ -56,9 +56,10 @@ name = "android.permission.INTERNET"
 label = "diari"
 icon = "@mipmap/ic_launcher"
 
-# Appear in Android's share menu for text (links, selections): the shared text
-# opens diari's quick-add field. The MAIN/LAUNCHER filter is added by cargo-apk.
+# Appear in Android's share menu for text, files and images (one or several):
+# they're added to today's note, files into its .files folder. The
+# MAIN/LAUNCHER filter is added by cargo-apk.
 [[package.metadata.android.application.activity.intent_filter]]
-actions = ["android.intent.action.SEND"]
+actions = ["android.intent.action.SEND", "android.intent.action.SEND_MULTIPLE"]
 categories = ["android.intent.category.DEFAULT"]
-data = [{ mime_type = "text/plain" }]
+data = [{ mime_type = "*/*" }]

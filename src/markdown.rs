@@ -10,6 +10,9 @@ pub enum Kind {
     Quote,
     ListItem,
     Rule,
+    /// A link (`[label](target)` or `![alt](target)`), shown below the text
+    /// it appears in: the app shows local images and opens everything else.
+    Link,
 }
 
 impl Kind {
@@ -22,6 +25,7 @@ impl Kind {
             Kind::Quote => 8,
             Kind::ListItem => 9,
             Kind::Rule => 10,
+            Kind::Link => 12,
         }
     }
 }
@@ -31,6 +35,8 @@ pub struct Block {
     pub kind: Kind,
     pub text: String,
     pub indent: i32,
+    /// Link target, for `Kind::Link`.
+    pub target: String,
 }
 
 struct State {
@@ -39,6 +45,10 @@ struct State {
     cur: Option<(Kind, i32)>,
     lists: Vec<Option<u64>>,
     quote: i32,
+    /// Links in the current block: (target, label), emitted after it.
+    links: Vec<(String, String)>,
+    /// Open link: its target and where its label starts in `buf`.
+    open_link: Option<(String, usize)>,
 }
 
 impl State {
@@ -50,10 +60,26 @@ impl State {
                 self.buf.trim().to_string()
             };
             if !text.is_empty() {
-                self.out.push(Block { kind, text, indent });
+                self.out.push(Block { kind, text, indent, target: String::new() });
+            }
+            for (target, label) in self.links.drain(..) {
+                self.out.push(Block { kind: Kind::Link, text: label, indent, target });
             }
         }
         self.buf.clear();
+    }
+
+    fn start_link(&mut self, target: &str) {
+        self.ensure_open();
+        self.open_link = Some((target.to_string(), self.buf.len()));
+    }
+
+    fn end_link(&mut self) {
+        if let Some((target, start)) = self.open_link.take() {
+            let label = self.buf[start..].trim().to_string();
+            let label = if label.is_empty() { target.rsplit('/').next().unwrap_or(&target).to_string() } else { label };
+            self.links.push((target, label));
+        }
     }
 
     fn indent(&self) -> i32 {
@@ -74,7 +100,15 @@ pub fn parse(src: &str) -> Vec<Block> {
         | Options::ENABLE_TASKLISTS
         | Options::ENABLE_STRIKETHROUGH
         | Options::ENABLE_FOOTNOTES;
-    let mut s = State { out: Vec::new(), buf: String::new(), cur: None, lists: Vec::new(), quote: 0 };
+    let mut s = State {
+        out: Vec::new(),
+        buf: String::new(),
+        cur: None,
+        lists: Vec::new(),
+        quote: 0,
+        links: Vec::new(),
+        open_link: None,
+    };
 
     for ev in Parser::new_ext(src, opts) {
         match ev {
@@ -123,7 +157,7 @@ pub fn parse(src: &str) -> Vec<Block> {
                     s.flush();
                     s.cur = Some((Kind::Code, s.indent()));
                 }
-                Tag::Image { .. } => s.buf.push_str("[image: "),
+                Tag::Link { dest_url, .. } | Tag::Image { dest_url, .. } => s.start_link(&dest_url),
                 _ => {}
             },
             Event::End(tag) => match tag {
@@ -142,7 +176,7 @@ pub fn parse(src: &str) -> Vec<Block> {
                     s.buf = trimmed;
                     s.flush();
                 }
-                TagEnd::Image => s.buf.push(']'),
+                TagEnd::Link | TagEnd::Image => s.end_link(),
                 _ => {}
             },
             Event::Text(t) => {
@@ -161,7 +195,7 @@ pub fn parse(src: &str) -> Vec<Block> {
             Event::HardBreak => s.buf.push('\n'),
             Event::Rule => {
                 s.flush();
-                s.out.push(Block { kind: Kind::Rule, text: String::new(), indent: 0 });
+                s.out.push(Block { kind: Kind::Rule, text: String::new(), indent: 0, target: String::new() });
             }
             Event::TaskListMarker(done) => s.buf.push_str(if done { "[x] " } else { "[ ] " }),
             Event::FootnoteReference(r) => {
@@ -202,6 +236,24 @@ mod tests {
                 (Kind::Code, "fn x() {}".into(), 0),
                 (Kind::Rule, "".into(), 0),
                 (Kind::ListItem, "• [x] done".into(), 0),
+            ]
+        );
+    }
+
+    #[test]
+    fn links_follow_their_block() {
+        let got: Vec<_> = parse("- 09:05 [photo.jpg](n.md.files/photo.jpg)\n\nsee ![](a.png) and [site](https://x.y)\n")
+            .into_iter()
+            .map(|b| (b.kind, b.text, b.target))
+            .collect();
+        assert_eq!(
+            got,
+            vec![
+                (Kind::ListItem, "• 09:05 photo.jpg".into(), "".into()),
+                (Kind::Link, "photo.jpg".into(), "n.md.files/photo.jpg".into()),
+                (Kind::Para, "see  and site".into(), "".into()),
+                (Kind::Link, "a.png".into(), "a.png".into()),
+                (Kind::Link, "site".into(), "https://x.y".into()),
             ]
         );
     }

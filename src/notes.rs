@@ -30,6 +30,10 @@ pub fn list(dir: &Path) -> Vec<NoteInfo> {
             let path = entry.path();
             let Ok(ft) = entry.file_type() else { continue };
             if ft.is_dir() {
+                // A note's attachments, not notes.
+                if crate::attachments::is_attachment_dir(&name.to_string_lossy()) {
+                    continue;
+                }
                 walk(root, &path, out);
             } else if ft.is_file() && is_md(&path) {
                 let modified = entry
@@ -144,8 +148,14 @@ pub fn write(dir: &Path, rel: &str, content: &str) -> io::Result<()> {
     atomic_write(&resolve(dir, rel)?, content.as_bytes())
 }
 
+/// Delete a note and its attachment folder.
 pub fn delete(dir: &Path, rel: &str) -> io::Result<()> {
-    std::fs::remove_file(resolve(dir, rel)?)
+    std::fs::remove_file(resolve(dir, rel)?)?;
+    let files = resolve(dir, &crate::attachments::dir_for(rel))?;
+    if files.is_dir() {
+        std::fs::remove_dir_all(files)?;
+    }
+    Ok(())
 }
 
 /// Rename a note; returns the new relative path.
@@ -159,7 +169,23 @@ pub fn rename(dir: &Path, rel: &str, new_name: &str) -> io::Result<String> {
     if let Some(parent) = to.parent() {
         std::fs::create_dir_all(parent)?;
     }
-    std::fs::rename(from, to)?;
+    std::fs::rename(from, &to)?;
+
+    // Move the attachment folder along and point the note's links at it.
+    let old_files = resolve(dir, &crate::attachments::dir_for(rel))?;
+    if old_files.is_dir() {
+        let new_files = resolve(dir, &crate::attachments::dir_for(&new_rel))?;
+        std::fs::rename(&old_files, &new_files)?;
+        let file_name = |r: &str| r.rsplit('/').next().unwrap_or(r).to_string();
+        let (old_name, new_name) = (file_name(rel), file_name(&new_rel));
+        let text = std::fs::read_to_string(&to)?;
+        let fixed = text
+            .replace(&format!("({old_name}.files/"), &format!("({new_name}.files/"))
+            .replace(&format!("(<{old_name}.files/"), &format!("(<{new_name}.files/"));
+        if fixed != text {
+            atomic_write(&to, fixed.as_bytes())?;
+        }
+    }
     Ok(new_rel)
 }
 
@@ -361,6 +387,24 @@ mod tests {
         write(d, "2026_03_07.md", "no newline").unwrap();
         append_to_today(d, day, "- 09:06 b").unwrap();
         assert_eq!(read(d, "2026_03_07.md").unwrap(), "no newline\n- 09:06 b\n");
+    }
+
+    #[test]
+    fn attachments_follow_their_note() {
+        let tmp = tempfile::tempdir().unwrap();
+        let d = tmp.path();
+        write(d, "a.md", "- [p](a.md.files/p.jpg)\n").unwrap();
+        std::fs::create_dir(d.join("a.md.files")).unwrap();
+        std::fs::write(d.join("a.md.files/p.jpg"), b"x").unwrap();
+        std::fs::write(d.join("a.md.files/notes.md"), b"not a note").unwrap();
+        assert_eq!(list(d).len(), 1, "attachment folders are not listed");
+
+        assert_eq!(rename(d, "a.md", "b").unwrap(), "b.md");
+        assert!(d.join("b.md.files/p.jpg").exists() && !d.join("a.md.files").exists());
+        assert_eq!(read(d, "b.md").unwrap(), "- [p](b.md.files/p.jpg)\n");
+
+        delete(d, "b.md").unwrap();
+        assert!(!d.join("b.md.files").exists());
     }
 
     #[test]

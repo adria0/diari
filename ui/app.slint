@@ -24,11 +24,14 @@ export struct VersionItem {
     subtitle: string,
 }
 
-// kind: 0 paragraph, 1-6 heading, 7 code, 8 quote, 9 list item, 10 rule
+// kind: 0 paragraph, 1-6 heading, 7 code, 8 quote, 9 list item, 10 rule,
+// 11 image (shown), 12 link (tap to open)
 export struct MdBlock {
     kind: int,
     text: string,
     indent: int,
+    image: image,
+    target: string,
 }
 
 // state: 0 ok, 1 syncing, 2 error, 3 conflicts, 4 local only
@@ -213,6 +216,7 @@ component ListPane inherits Rectangle {
 
 component PreviewView inherits Rectangle {
     in property <[MdBlock]> blocks;
+    callback open-link(string);
     ListView {
         for b in root.blocks: HorizontalLayout {
             padding-left: 12px + b.indent * 20px;
@@ -233,7 +237,38 @@ component PreviewView inherits Rectangle {
                     background: Palette.foreground.with-alpha(0.25);
                 }
             }
-            if b.kind != 10: Rectangle {
+            if b.kind == 11: Rectangle {
+                height: min(420px, (root.width - 24px - b.indent * 20px) * b.image.height / max(1, b.image.width));
+                Image {
+                    width: parent.width;
+                    height: parent.height;
+                    source: b.image;
+                    image-fit: contain;
+                    horizontal-alignment: left;
+                }
+                TouchArea {
+                    mouse-cursor: pointer;
+                    clicked => { root.open-link(b.target); }
+                }
+            }
+            if b.kind == 12: Rectangle {
+                height: link-text.preferred-height + 8px;
+                border-radius: 4px;
+                background: link-ta.has-hover ? Palette.accent-background.with-alpha(0.12) : transparent;
+                link-text := Text {
+                    x: 4px;
+                    width: parent.width - 8px;
+                    text: "→ " + b.text;
+                    wrap: word-wrap;
+                    color: Palette.accent-background;
+                    font-size: 15px;
+                }
+                link-ta := TouchArea {
+                    mouse-cursor: pointer;
+                    clicked => { root.open-link(b.target); }
+                }
+            }
+            if b.kind != 10 && b.kind < 11: Rectangle {
                 background: b.kind == 7 ? Palette.alternate-background : transparent;
                 border-radius: 4px;
                 HorizontalLayout {
@@ -547,6 +582,7 @@ component EditorPane inherits Rectangle {
     in property <bool> history-side-by-side;
     callback edited(string);
     callback toggle-preview();
+    callback open-link(string);
     callback open-history();
     callback select-version(string);
     callback restore-version();
@@ -639,6 +675,7 @@ component EditorPane inherits Rectangle {
         if !root.show-history && root.preview: PreviewView {
             vertical-stretch: 1;
             blocks: root.blocks;
+            open-link(t) => { root.open-link(t); }
         }
     }
 }
@@ -825,6 +862,7 @@ export component AppWindow inherits Window {
     callback delete-note();
     callback text-edited(string);
     callback preview-toggled();
+    callback open-link(string);
     callback open-history();
     callback select-version(string);
     callback restore-version();
@@ -901,6 +939,7 @@ export component AppWindow inherits Window {
                 delete-at(i, c) => { return root.ed-delete-at(i, c); }
                 edited(t) => { root.text-edited(t); }
                 toggle-preview => { root.preview-toggled(); }
+                open-link(t) => { root.open-link(t); }
                 show-history: root.show-history;
                 versions: root.versions;
                 history-selected: root.history-selected;

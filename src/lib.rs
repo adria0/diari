@@ -1,3 +1,4 @@
+pub mod attachments;
 pub mod config;
 #[cfg(target_os = "android")]
 mod android;
@@ -40,8 +41,8 @@ struct App {
     /// Today's note didn't exist at launch: open (and create) it once the
     /// first sync is done, so a copy written on another device comes first.
     open_today_after_sync: Cell<bool>,
-    /// Text shared to the app at launch, appended once the first sync is done.
-    pending_share: RefCell<Option<String>>,
+    /// What was shared to the app at launch, added once the first sync is done.
+    pending_share: RefCell<Option<(String, Vec<SharedFile>)>>,
     /// The open note as lines, mirrored into `ed_model` for the line editor.
     lines: RefCell<Vec<String>>,
     ed_model: Rc<VecModel<EdLine>>,
@@ -63,10 +64,19 @@ fn with_app(f: impl FnOnce(&Rc<App>)) {
 /// Why the app was started, when it wasn't from the launcher (Android).
 #[derive(Debug, Clone, PartialEq)]
 pub enum Launch {
-    /// Text sent from another app's share sheet: append it to today's note.
-    Share(String),
+    /// Text and/or files sent from another app's share sheet: add them to
+    /// today's note.
+    Share { text: String, files: Vec<SharedFile> },
     /// The "Quick add" shortcut: show the quick-add bar.
     QuickAdd,
+}
+
+/// A file shared to the app, already copied to a staging path.
+#[derive(Debug, Clone, PartialEq)]
+pub struct SharedFile {
+    pub path: PathBuf,
+    /// Its name as the sending app gave it.
+    pub name: String,
 }
 
 /// Set before `run`.
@@ -76,12 +86,50 @@ pub fn set_launch(launch: Launch) {
     *LAUNCH.lock().unwrap() = Some(launch);
 }
 
+/// MdBlock.kind of an image shown in the preview (see ui/app.slint).
+const PREVIEW_IMAGE: i32 = 11;
+
 /// How long the "Added to …" confirmation shows before a share returns to
 /// the app it came from.
 const SHARE_DONE_DELAY: Duration = Duration::from_millis(1500);
 
 fn ed_line(text: &str) -> EdLine {
     EdLine { text: text.into(), heading: lines::is_heading(text) }
+}
+
+/// Open a web page (or mail link, …) in the system's app for it.
+fn platform_open_url(url: &str) -> Result<(), String> {
+    #[cfg(target_os = "android")]
+    return android::open_url(url);
+    #[cfg(not(target_os = "android"))]
+    return desktop_open(url.as_ref());
+}
+
+/// Open a note's attached file in the system's app for it. `note` is the
+/// note it belongs to (Android names the exported copy after it).
+fn platform_open_file(path: &std::path::Path, note: &str) -> Result<(), String> {
+    #[cfg(target_os = "android")]
+    return android::open_file(path, note);
+    #[cfg(not(target_os = "android"))]
+    {
+        let _ = note;
+        desktop_open(path.as_os_str())
+    }
+}
+
+#[cfg(not(target_os = "android"))]
+fn desktop_open(what: &std::ffi::OsStr) -> Result<(), String> {
+    #[cfg(target_os = "macos")]
+    let mut cmd = std::process::Command::new("open");
+    #[cfg(target_os = "windows")]
+    let mut cmd = {
+        let mut c = std::process::Command::new("cmd");
+        c.args(["/C", "start", ""]);
+        c
+    };
+    #[cfg(all(unix, not(target_os = "macos")))]
+    let mut cmd = std::process::Command::new("xdg-open");
+    cmd.arg(what).spawn().map(|_| ()).map_err(|e| e.to_string())
 }
 
 /// Close the app's window on Android (back to the app a share came from).
@@ -258,26 +306,50 @@ impl App {
         if text.trim().is_empty() {
             return false;
         }
+        let line = notes::quick_line(chrono::Local::now().time(), text);
+        let added = self.add_to_today(|_, _| Ok(vec![line]));
+        if added {
+            self.ui().set_quick_text(SharedString::new());
+            self.ui().set_quick_visible(false);
+        }
+        added
+    }
+
+    /// Append lines to today's note (creating it), refresh what's shown and
+    /// queue a sync. `make` gets the notes dir and today's note path, and may
+    /// first store attachments next to it.
+    fn add_to_today(
+        self: &Rc<Self>,
+        make: impl FnOnce(&std::path::Path, &str) -> std::io::Result<Vec<String>>,
+    ) -> bool {
         self.save_now();
-        let now = chrono::Local::now();
-        let line = notes::quick_line(now.time(), text);
+        let dir = &self.shared.notes_dir;
         let res = {
             let _g = self.shared.fs_lock.lock().unwrap();
-            notes::append_to_today(&self.shared.notes_dir, now.date_naive(), &line)
+            let day = chrono::Local::now().date_naive();
+            notes::today(dir, day).and_then(|rel| {
+                let lines = make(dir, &rel)?;
+                for line in &lines {
+                    notes::append_to_today(dir, day, line)?;
+                }
+                Ok((rel, lines.len()))
+            })
         };
         match res {
-            Ok(rel) => {
-                // If that note is open, show the new line there too.
+            Ok((rel, n)) => {
+                // If that note is open, show the new lines there too.
                 if self.editor.borrow().path.as_deref() == Some(rel.as_str()) {
-                    if let Ok(t) = notes::read(&self.shared.notes_dir, &rel) {
+                    if let Ok(t) = notes::read(dir, &rel) {
                         self.editor.borrow_mut().saved = t.clone();
                         self.set_text(&t);
+                        if self.ui().get_preview() {
+                            self.update_preview();
+                        }
                     }
                 }
-                self.ui().set_quick_text(SharedString::new());
-                self.ui().set_quick_visible(false);
                 self.refresh_list();
-                self.show_message(format!("Added to {rel}"), 4);
+                let what = if n == 1 { String::new() } else { format!("{n} items ") };
+                self.show_message(format!("Added {what}to {rel}"), 4);
                 self.engine.request();
                 true
             }
@@ -291,19 +363,52 @@ impl App {
     /// Text shared from another app: append it after the first sync (so a
     /// today's note made on another device is pulled in first), then return
     /// to that app.
-    fn receive_share(self: &Rc<Self>, text: String) {
-        if text.trim().is_empty() {
+    fn receive_share(self: &Rc<Self>, text: String, files: Vec<SharedFile>) {
+        if text.trim().is_empty() && files.is_empty() {
             finish_activity();
             return;
         }
         self.ui().set_message("Adding to today's note…".into());
-        *self.pending_share.borrow_mut() = Some(text);
+        *self.pending_share.borrow_mut() = Some((text, files));
     }
 
+    /// Store shared files in today's note's attachment folder, link each one
+    /// (and add any shared text), then return to the sending app.
     fn finish_pending_share(self: &Rc<Self>) {
-        let Some(text) = self.pending_share.borrow_mut().take() else { return };
-        if self.quick_add(&text) {
+        let Some((text, files)) = self.pending_share.borrow_mut().take() else { return };
+        let time = chrono::Local::now().time();
+        let added = self.add_to_today(|dir, rel| {
+            let mut lines = Vec::new();
+            for f in &files {
+                let target = attachments::add(dir, rel, &f.path, &f.name)?;
+                let label = target.rsplit('/').next().unwrap_or(&target).to_string();
+                lines.push(attachments::link_line(time, &label, &target));
+            }
+            // Text shared along with files is often just the file name again.
+            if !text.trim().is_empty() && !files.iter().any(|f| text.trim() == f.name) {
+                lines.push(notes::quick_line(time, &text));
+            }
+            Ok(lines)
+        });
+        if added {
             slint::Timer::single_shot(SHARE_DONE_DELAY, finish_activity);
+        }
+    }
+
+    /// A link in the preview was tapped: open the web page, or the attached
+    /// file with the system's app for it.
+    fn open_link(self: &Rc<Self>, target: &str) {
+        let res = if attachments::is_url(target) {
+            platform_open_url(target)
+        } else {
+            let note = self.editor.borrow().path.clone().unwrap_or_default();
+            match attachments::resolve_link(&self.shared.notes_dir, &note, target) {
+                Some(path) if path.is_file() => platform_open_file(&path, &note),
+                _ => Err(format!("{target} was not found")),
+            }
+        };
+        if let Err(e) = res {
+            self.show_message(format!("Could not open: {e}"), 6);
         }
     }
 
@@ -417,9 +522,23 @@ impl App {
 
     fn update_preview(&self) {
         let ui = self.ui();
+        let note = self.editor.borrow().path.clone().unwrap_or_default();
         let blocks: Vec<MdBlock> = markdown::parse(&ui.get_editor_text())
             .into_iter()
-            .map(|b| MdBlock { kind: b.kind.code(), text: b.text.into(), indent: b.indent })
+            .map(|b| {
+                let mut kind = b.kind.code();
+                let mut image = slint::Image::default();
+                if b.kind == markdown::Kind::Link && attachments::is_image(&b.target) {
+                    // Show local images inline; anything else stays a link to open.
+                    if let Some(img) = attachments::resolve_link(&self.shared.notes_dir, &note, &b.target)
+                        .and_then(|p| slint::Image::load_from_path(&p).ok())
+                    {
+                        kind = PREVIEW_IMAGE;
+                        image = img;
+                    }
+                }
+                MdBlock { kind, text: b.text.into(), indent: b.indent, image, target: b.target.into() }
+            })
             .collect();
         ui.set_blocks(ModelRc::new(VecModel::from(blocks)));
     }
@@ -623,6 +742,7 @@ pub fn run(
         })
     });
     ui.on_open_today(|| with_app(|a| a.open_today()));
+    ui.on_open_link(|t| with_app(|a| a.open_link(&t)));
     ui.on_quick_add(|t| {
         with_app(|a| {
             a.quick_add(&t);
@@ -738,7 +858,7 @@ pub fn run(
 
     app.refresh_list();
     match LAUNCH.lock().unwrap().take() {
-        Some(Launch::Share(text)) => app.receive_share(text),
+        Some(Launch::Share { text, files }) => app.receive_share(text, files),
         Some(Launch::QuickAdd) => app.show_quick_add(""),
         None => app.open_today_at_launch(),
     }
@@ -762,7 +882,11 @@ fn android_main(app: slint::android::AndroidApp) {
     let data_dir = app
         .internal_data_path()
         .unwrap_or_else(|| PathBuf::from("/data/local/tmp/diari"));
-    if let Some(launch) = android::launch_request(&app) {
+    // Shared files are copied here first, then moved into the note's
+    // attachment folder once the first sync is done.
+    let staging = data_dir.join("incoming");
+    let _ = std::fs::remove_dir_all(&staging);
+    if let Some(launch) = android::launch_request(&app, &staging) {
         set_launch(launch);
     }
     android::set_app(&app);
@@ -776,7 +900,10 @@ fn android_main(app: slint::android::AndroidApp) {
         // a sync is queued; the next launch starts fresh with its own intent.
         PollEvent::Main(MainEvent::Stop) => {
             request_sync();
-            android::finish(&app_for_events);
+            // Opening a link or file from diari comes back to the note.
+            if !android::take_opening_other_app() {
+                android::finish(&app_for_events);
+            }
         }
         _ => {}
     })

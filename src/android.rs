@@ -1,13 +1,31 @@
 //! Android glue over JNI: the intent diari was started with (share or
-//! quick-add shortcut), the long-press "Quick add" shortcut, and finishing
-//! the activity.
+//! quick-add shortcut), the long-press "Quick add" shortcut, opening links
+//! and attached files in other apps, and finishing the activity.
 
-use jni::objects::{JObject, JString, JValue};
+use jni::objects::{JByteArray, JObject, JObjectArray, JString, JValue};
 use jni::{JNIEnv, JavaVM};
 use slint::android::AndroidApp;
+use std::io::{Read, Write};
+use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Mutex;
 
-use crate::Launch;
+use crate::{attachments, Launch, SharedFile};
+
+/// Set while diari itself opens another app (a link or a file), so leaving
+/// for it doesn't finish the activity and the user comes back to the note.
+static OPENING_OTHER_APP: AtomicBool = AtomicBool::new(false);
+
+/// For the Stop handler: true if this Stop is diari opening another app.
+pub fn take_opening_other_app() -> bool {
+    OPENING_OTHER_APP.swap(false, Ordering::SeqCst)
+}
+
+/// Where opened attachments are copied so other apps can read them.
+const EXPORT_DIR: &str = "Download/diari/";
+const FLAG_GRANT_READ_URI_PERMISSION: i32 = 0x0000_0001;
+const FLAG_ACTIVITY_NEW_TASK: i32 = 0x1000_0000;
+const COPY_CHUNK: usize = 64 * 1024;
 
 /// The running activity, so app code can finish it (see `finish_current`).
 static APP: Mutex<Option<AndroidApp>> = Mutex::new(None);
@@ -61,9 +79,9 @@ fn string_extra(env: &mut JNIEnv, intent: &JObject, key: &str) -> jni::errors::R
     to_string(env, v)
 }
 
-/// Why diari was started, if not from the launcher: text shared to it (with
-/// its subject, e.g. a page title), or the "Quick add" shortcut.
-pub fn launch_request(app: &AndroidApp) -> Option<Launch> {
+/// Why diari was started, if not from the launcher: text and/or files shared
+/// to it (files are copied into `staging`), or the "Quick add" shortcut.
+pub fn launch_request(app: &AndroidApp, staging: &Path) -> Option<Launch> {
     with_activity(app, |env, activity| {
         let intent = env.call_method(activity, "getIntent", "()Landroid/content/Intent;", &[])?.l()?;
         if intent.is_null() {
@@ -71,16 +89,279 @@ pub fn launch_request(app: &AndroidApp) -> Option<Launch> {
         }
         let action = env.call_method(&intent, "getAction", "()Ljava/lang/String;", &[])?.l()?;
         match to_string(env, action)?.as_deref() {
-            Some("android.intent.action.SEND") => {
+            Some(action @ ("android.intent.action.SEND" | "android.intent.action.SEND_MULTIPLE")) => {
                 let text = string_extra(env, &intent, "android.intent.extra.TEXT")?.unwrap_or_default();
                 let subject = string_extra(env, &intent, "android.intent.extra.SUBJECT")?.unwrap_or_default();
-                Ok(Some(Launch::Share(combine_share(&subject, &text))))
+                let uris = shared_uris(env, &intent, action == "android.intent.action.SEND_MULTIPLE")?;
+                let mut files = Vec::new();
+                for (i, uri) in uris.iter().enumerate() {
+                    match copy_shared(env, activity, uri, staging, i) {
+                        Ok(f) => files.push(f),
+                        Err(e) => {
+                            // Don't let one unreadable file fail the others.
+                            if env.exception_check().unwrap_or(false) {
+                                let _ = env.exception_describe();
+                                let _ = env.exception_clear();
+                            }
+                            log::warn!("could not read shared file {i}: {e}");
+                        }
+                    }
+                }
+                Ok(Some(Launch::Share { text: combine_share(&subject, &text), files }))
             }
             Some(QUICK_ADD_ACTION) => Ok(Some(Launch::QuickAdd)),
             _ => Ok(None),
         }
     })
     .flatten()
+}
+
+/// The `content://` URIs of shared files (EXTRA_STREAM).
+fn shared_uris<'a>(env: &mut JNIEnv<'a>, intent: &JObject, multiple: bool) -> jni::errors::Result<Vec<JObject<'a>>> {
+    let key = env.new_string("android.intent.extra.STREAM")?;
+    if !multiple {
+        let uri = env
+            .call_method(intent, "getParcelableExtra", "(Ljava/lang/String;)Landroid/os/Parcelable;", &[JValue::Object(&key)])?
+            .l()?;
+        return Ok(if uri.is_null() { vec![] } else { vec![uri] });
+    }
+    let list = env
+        .call_method(intent, "getParcelableArrayListExtra", "(Ljava/lang/String;)Ljava/util/ArrayList;", &[JValue::Object(&key)])?
+        .l()?;
+    if list.is_null() {
+        return Ok(vec![]);
+    }
+    let n = env.call_method(&list, "size", "()I", &[])?.i()?;
+    let mut out = Vec::new();
+    for i in 0..n {
+        let uri = env.call_method(&list, "get", "(I)Ljava/lang/Object;", &[JValue::Int(i)])?.l()?;
+        if !uri.is_null() {
+            out.push(uri);
+        }
+    }
+    Ok(out)
+}
+
+fn content_resolver<'a>(env: &mut JNIEnv<'a>, activity: &JObject) -> jni::errors::Result<JObject<'a>> {
+    env.call_method(activity, "getContentResolver", "()Landroid/content/ContentResolver;", &[])?.l()
+}
+
+/// Copy one shared file into `staging`, keeping the name the sending app gave it.
+fn copy_shared(env: &mut JNIEnv, activity: &JObject, uri: &JObject, staging: &Path, i: usize) -> Result<SharedFile, String> {
+    let e = |e: jni::errors::Error| e.to_string();
+    let resolver = content_resolver(env, activity).map_err(e)?;
+    let mime = env
+        .call_method(&resolver, "getType", "(Landroid/net/Uri;)Ljava/lang/String;", &[JValue::Object(uri)])
+        .and_then(|v| v.l())
+        .map_err(e)?;
+    let mime = to_string(env, mime).map_err(e)?.unwrap_or_default();
+    let name = display_name_or_none(env, &resolver, uri)
+        .unwrap_or_else(|| format!("shared-{}.{}", i + 1, attachments::ext_for_mime(&mime)));
+
+    let stream = env
+        .call_method(&resolver, "openInputStream", "(Landroid/net/Uri;)Ljava/io/InputStream;", &[JValue::Object(uri)])
+        .and_then(|v| v.l())
+        .map_err(e)?;
+    if stream.is_null() {
+        return Err("no data".into());
+    }
+    std::fs::create_dir_all(staging).map_err(|e| e.to_string())?;
+    let path: PathBuf = staging.join(format!("{i}-{}", attachments::sanitize(&name)));
+    let mut out = std::fs::File::create(&path).map_err(|e| e.to_string())?;
+    let buf = env.new_byte_array(COPY_CHUNK as i32).map_err(e)?;
+    let mut chunk = vec![0i8; COPY_CHUNK];
+    let res = loop {
+        let n = match env.call_method(&stream, "read", "([B)I", &[JValue::Object(&buf)]).and_then(|v| v.i()) {
+            Ok(n) => n,
+            Err(err) => break Err(err.to_string()),
+        };
+        if n < 0 {
+            break Ok(());
+        }
+        let n = n as usize;
+        if let Err(err) = env.get_byte_array_region(&buf, 0, &mut chunk[..n]) {
+            break Err(err.to_string());
+        }
+        let bytes: &[u8] = unsafe { std::slice::from_raw_parts(chunk.as_ptr() as *const u8, n) };
+        if let Err(err) = out.write_all(bytes) {
+            break Err(err.to_string());
+        }
+    };
+    let _ = env.call_method(&stream, "close", "()V", &[]);
+    res.map(|_| SharedFile { path, name })
+}
+
+/// OpenableColumns.DISPLAY_NAME of a content URI.
+fn display_name(env: &mut JNIEnv, resolver: &JObject, uri: &JObject) -> Option<String> {
+    let cursor = env
+        .call_method(
+            resolver,
+            "query",
+            "(Landroid/net/Uri;[Ljava/lang/String;Ljava/lang/String;[Ljava/lang/String;Ljava/lang/String;)Landroid/database/Cursor;",
+            &[JValue::Object(uri), JValue::Object(&JObject::null()), JValue::Object(&JObject::null()), JValue::Object(&JObject::null()), JValue::Object(&JObject::null())],
+        )
+        .ok()?
+        .l()
+        .ok()?;
+    if cursor.is_null() {
+        return None;
+    }
+    let mut name = None;
+    if env.call_method(&cursor, "moveToFirst", "()Z", &[]).ok()?.z().ok()? {
+        let col = env.new_string("_display_name").ok()?;
+        let idx = env.call_method(&cursor, "getColumnIndex", "(Ljava/lang/String;)I", &[JValue::Object(&col)]).ok()?.i().ok()?;
+        if idx >= 0 {
+            let v = env.call_method(&cursor, "getString", "(I)Ljava/lang/String;", &[JValue::Int(idx)]).ok()?.l().ok()?;
+            name = to_string(env, v).ok()?;
+        }
+    }
+    let _ = env.call_method(&cursor, "close", "()V", &[]);
+    name.filter(|n| !n.trim().is_empty())
+}
+
+/// `display_name` without leaving a Java exception pending (some providers
+/// don't support queries; the copy can still go ahead).
+fn display_name_or_none(env: &mut JNIEnv, resolver: &JObject, uri: &JObject) -> Option<String> {
+    let name = display_name(env, resolver, uri);
+    if env.exception_check().unwrap_or(false) {
+        let _ = env.exception_clear();
+    }
+    name
+}
+
+fn start_activity(env: &mut JNIEnv, activity: &JObject, intent: &JObject) -> jni::errors::Result<()> {
+    OPENING_OTHER_APP.store(true, Ordering::SeqCst);
+    let res = env.call_method(activity, "startActivity", "(Landroid/content/Intent;)V", &[JValue::Object(intent)]);
+    if res.is_err() {
+        OPENING_OTHER_APP.store(false, Ordering::SeqCst);
+    }
+    res.map(|_| ())
+}
+
+fn current_app() -> Result<AndroidApp, String> {
+    APP.lock().unwrap().clone().ok_or_else(|| "app not ready".to_string())
+}
+
+/// Open a web page (or mail link, …) in the app that handles it.
+pub fn open_url(url: &str) -> Result<(), String> {
+    let app = current_app()?;
+    with_activity(&app, |env, activity| {
+        let s = env.new_string(url)?;
+        let uri = env
+            .call_static_method("android/net/Uri", "parse", "(Ljava/lang/String;)Landroid/net/Uri;", &[JValue::Object(&s)])?
+            .l()?;
+        let action = env.new_string("android.intent.action.VIEW")?;
+        let intent = env.new_object(
+            "android/content/Intent",
+            "(Ljava/lang/String;Landroid/net/Uri;)V",
+            &[JValue::Object(&action), JValue::Object(&uri)],
+        )?;
+        env.call_method(&intent, "addFlags", "(I)Landroid/content/Intent;", &[JValue::Int(FLAG_ACTIVITY_NEW_TASK)])?;
+        start_activity(env, activity, &intent)
+    })
+    .ok_or_else(|| "no app can open this link".to_string())
+}
+
+/// Open an attached file in the app that handles its type. Other apps can't
+/// read diari's private files, so it's copied to Downloads/diari first (named
+/// after its note, and reused if it's already there).
+pub fn open_file(path: &Path, note: &str) -> Result<(), String> {
+    let app = current_app()?;
+    let file_name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+    let note_stem = note.rsplit('/').next().unwrap_or(note).trim_end_matches(".md");
+    let export_name = format!("{note_stem}-{file_name}");
+    let mime = attachments::mime_for(&file_name);
+    let mut data = Vec::new();
+    std::fs::File::open(path).and_then(|mut f| f.read_to_end(&mut data)).map_err(|e| e.to_string())?;
+
+    with_activity(&app, |env, activity| {
+        let resolver = content_resolver(env, activity)?;
+        // MediaStore.Downloads exists from Android 10 (API 29).
+        let collection = env
+            .get_static_field("android/provider/MediaStore$Downloads", "EXTERNAL_CONTENT_URI", "Landroid/net/Uri;")?
+            .l()?;
+        let uri = match find_export(env, &resolver, &collection, &export_name)? {
+            Some(uri) => uri,
+            None => {
+                let values = env.new_object("android/content/ContentValues", "()V", &[])?;
+                for (k, v) in [("_display_name", export_name.as_str()), ("mime_type", mime), ("relative_path", EXPORT_DIR)] {
+                    let (k, v) = (env.new_string(k)?, env.new_string(v)?);
+                    env.call_method(&values, "put", "(Ljava/lang/String;Ljava/lang/String;)V", &[JValue::Object(&k), JValue::Object(&v)])?;
+                }
+                let uri = env
+                    .call_method(
+                        &resolver,
+                        "insert",
+                        "(Landroid/net/Uri;Landroid/content/ContentValues;)Landroid/net/Uri;",
+                        &[JValue::Object(&collection), JValue::Object(&values)],
+                    )?
+                    .l()?;
+                let out = env
+                    .call_method(&resolver, "openOutputStream", "(Landroid/net/Uri;)Ljava/io/OutputStream;", &[JValue::Object(&uri)])?
+                    .l()?;
+                for chunk in data.chunks(COPY_CHUNK) {
+                    let arr: JByteArray = env.byte_array_from_slice(chunk)?;
+                    env.call_method(&out, "write", "([B)V", &[JValue::Object(&arr)])?;
+                    env.delete_local_ref(arr)?;
+                }
+                env.call_method(&out, "close", "()V", &[])?;
+                uri
+            }
+        };
+        let action = env.new_string("android.intent.action.VIEW")?;
+        let intent = env.new_object("android/content/Intent", "(Ljava/lang/String;)V", &[JValue::Object(&action)])?;
+        let mime_s = env.new_string(mime)?;
+        env.call_method(
+            &intent,
+            "setDataAndType",
+            "(Landroid/net/Uri;Ljava/lang/String;)Landroid/content/Intent;",
+            &[JValue::Object(&uri), JValue::Object(&mime_s)],
+        )?;
+        env.call_method(
+            &intent,
+            "addFlags",
+            "(I)Landroid/content/Intent;",
+            &[JValue::Int(FLAG_GRANT_READ_URI_PERMISSION | FLAG_ACTIVITY_NEW_TASK)],
+        )?;
+        start_activity(env, activity, &intent)
+    })
+    .ok_or_else(|| "no app can open this file here (opening files needs Android 10 or later)".to_string())
+}
+
+/// A copy of `name` already exported to Downloads/diari by diari.
+fn find_export<'a>(env: &mut JNIEnv<'a>, resolver: &JObject, collection: &JObject, name: &str) -> jni::errors::Result<Option<JObject<'a>>> {
+    let id_col = env.new_string("_id")?;
+    let projection: JObjectArray = env.new_object_array(1, "java/lang/String", &id_col)?;
+    let selection = env.new_string("_display_name=? AND relative_path=?")?;
+    let (n, d) = (env.new_string(name)?, env.new_string(EXPORT_DIR)?);
+    let args: JObjectArray = env.new_object_array(2, "java/lang/String", &n)?;
+    env.set_object_array_element(&args, 1, &d)?;
+    let cursor = env
+        .call_method(
+            resolver,
+            "query",
+            "(Landroid/net/Uri;[Ljava/lang/String;Ljava/lang/String;[Ljava/lang/String;Ljava/lang/String;)Landroid/database/Cursor;",
+            &[JValue::Object(collection), JValue::Object(&projection), JValue::Object(&selection), JValue::Object(&args), JValue::Object(&JObject::null())],
+        )?
+        .l()?;
+    if cursor.is_null() {
+        return Ok(None);
+    }
+    let mut found = None;
+    if env.call_method(&cursor, "moveToFirst", "()Z", &[])?.z()? {
+        let id = env.call_method(&cursor, "getLong", "(I)J", &[JValue::Int(0)])?.j()?;
+        found = Some(
+            env.call_static_method(
+                "android/content/ContentUris",
+                "withAppendedId",
+                "(Landroid/net/Uri;J)Landroid/net/Uri;",
+                &[JValue::Object(collection), JValue::Long(id)],
+            )?
+            .l()?,
+        );
+    }
+    env.call_method(&cursor, "close", "()V", &[])?;
+    Ok(found)
 }
 
 /// Shared links often come as subject = page title, text = URL.

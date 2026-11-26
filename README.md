@@ -10,6 +10,9 @@ Native markdown notes with automatic git sync, for macOS and Android. It's writt
   - 5 s after a save
   - every 5 min
 - **Conflicts never lose data.** If two devices edit the same note, the remote version keeps the name and the local version is saved as `name.conflict-<device>-<timestamp>.md`.
+- **Files and images (Android).** Share files or images to diari from any app, one or several at once. They're saved in today's note's attachment folder (`2026_11_26.md.files/`), and each one adds a line like `- 09:01 [photo.jpg](2026_11_26.md.files/photo.jpg)`.
+  - In the preview, linked images are shown, and other links open when you tap them: web links in the browser, files in the app for their type. On Android, a file is first copied to `Download/diari/` so other apps can read it (Android 10 or later).
+  - Attachment folders aren't shown in the note list, are synced with git, move when their note is renamed, and are deleted with it.
 
 ## Where things live
 | | macOS | Android |

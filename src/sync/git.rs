@@ -545,6 +545,21 @@ mod tests {
     }
 
     #[test]
+    fn attachments_are_committed() {
+        let tmp = tempfile::tempdir().unwrap();
+        let d = Dev { dir: tmp.path().join("n"), name: "x" };
+        fs::create_dir_all(d.dir.join("a.md.files")).unwrap();
+        fs::write(d.dir.join("a.md"), "- [p.jpg](a.md.files/p.jpg)\n").unwrap();
+        fs::write(d.dir.join("a.md.files/p.jpg"), [0xFFu8, 0xD8, 0xFF, 0x00]).unwrap();
+        sync_dev(&d, "");
+        let repo = Repository::open(&d.dir).unwrap();
+        let head = repo.head().unwrap().peel_to_commit().unwrap();
+        let blob = head.tree().unwrap().get_path(Path::new("a.md.files/p.jpg")).unwrap();
+        assert_eq!(repo.find_blob(blob.id()).unwrap().content(), &[0xFF, 0xD8, 0xFF, 0x00]);
+        assert!(head.message().unwrap().contains("Added: a.md.files/p.jpg\n"));
+    }
+
+    #[test]
     fn message_format() {
         let s = |v: &[&str]| v.iter().map(|x| x.to_string()).collect::<Vec<_>>();
         let one = Changes { edited: s(&["2026_11_26.md"]), ..Default::default() };
