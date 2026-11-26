@@ -153,6 +153,28 @@ fn watch_file_drops(ui: &AppWindow) {
     });
 }
 
+/// The platform's fixed-width font, used when Settings leaves it empty.
+/// (Slint doesn't resolve the generic name "monospace" on every platform.)
+fn default_mono_font() -> &'static str {
+    if cfg!(target_os = "macos") {
+        "Menlo"
+    } else if cfg!(target_os = "android") {
+        "Droid Sans Mono"
+    } else if cfg!(target_os = "windows") {
+        "Consolas"
+    } else {
+        "DejaVu Sans Mono"
+    }
+}
+
+/// Set the editor font from the config.
+fn apply_font(ui: &AppWindow, cfg: &Config) {
+    let family = if cfg.editor_font.is_empty() { default_mono_font() } else { cfg.editor_font.as_str() };
+    let font = ui.global::<EditorFont>();
+    font.set_family(family.into());
+    font.set_size(cfg.editor_font_size as f32);
+}
+
 /// Close the app's window on Android (back to the app a share came from).
 /// Nothing to do on desktop, where shares don't happen.
 fn finish_activity() {
@@ -601,6 +623,8 @@ impl App {
         ui.set_cfg_author_email(cfg.author_email.into());
         ui.set_cfg_device(cfg.device_name.into());
         ui.set_cfg_notes_dir(self.shared.notes_dir.display().to_string().into());
+        ui.set_cfg_editor_font(cfg.editor_font.clone().into());
+        ui.set_cfg_editor_font_size(cfg.editor_font_size.to_string().into());
         let keys = self.shared.keys.lock().unwrap();
         ui.set_public_key(keys.public_openssh.clone().into());
         ui.set_key_fingerprint(keys.fingerprint.clone().into());
@@ -617,6 +641,14 @@ impl App {
         cfg.author_name = ui.get_cfg_author_name().trim().to_string();
         cfg.author_email = ui.get_cfg_author_email().trim().to_string();
         cfg.device_name = ui.get_cfg_device().trim().to_string();
+        cfg.editor_font = ui.get_cfg_editor_font().trim().to_string();
+        cfg.editor_font_size = ui
+            .get_cfg_editor_font_size()
+            .trim()
+            .parse()
+            .map(|n: u32| n.clamp(*config::FONT_SIZES.start(), *config::FONT_SIZES.end()))
+            .unwrap_or(config::DEFAULT_FONT_SIZE);
+        apply_font(&ui, &cfg);
         let mut restart_needed = false;
         if ui.get_desktop() {
             let dir = PathBuf::from(ui.get_cfg_notes_dir().trim());
@@ -745,6 +777,8 @@ pub fn run(
 
     let ui = AppWindow::new()?;
     ui.set_desktop(desktop);
+    ui.set_default_font(default_mono_font().into());
+    apply_font(&ui, &shared.config.lock().unwrap());
 
     let weak_start = ui.as_weak();
     let weak_done = ui.as_weak();

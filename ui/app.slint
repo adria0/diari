@@ -18,6 +18,12 @@ export struct VersionItem {
     subtitle: string,
 }
 
+// Font of the editor and other note text, set from Settings.
+export global EditorFont {
+    in-out property <string> family: "monospace";
+    in-out property <length> size: 14px;
+}
+
 // kind: 0 paragraph, 1-6 heading, 7 code, 8 quote, 9 list item, 10 rule,
 // 11 image (shown), 12 link (tap to open)
 export struct MdBlock {
@@ -339,16 +345,16 @@ component DiffView inherits Rectangle {
                     width: 12px;
                     text: r.kind == 1 ? "+" : r.kind == 2 ? "−" : r.kind == 3 ? "⋯" : "";
                     color: r.kind == 1 ? #22a55b : r.kind == 2 ? #d64545 : Palette.foreground.with-alpha(0.4);
-                    font-family: "monospace";
-                    font-size: 14px;
+                    font-family: EditorFont.family;
+                    font-size: EditorFont.size;
                 }
                 Text {
                     horizontal-stretch: 1;
                     text: r.text;
                     wrap: word-wrap;
                     color: r.kind == 0 ? Palette.foreground.with-alpha(0.6) : Palette.foreground;
-                    font-family: "monospace";
-                    font-size: 14px;
+                    font-family: EditorFont.family;
+                    font-size: EditorFont.size;
                 }
             }
         }
@@ -358,8 +364,8 @@ component DiffView inherits Rectangle {
 component VersionText inherits TextEdit {
     read-only: true;
     wrap: word-wrap;
-    font-family: "monospace";
-    font-size: 14px;
+    font-family: EditorFont.family;
+    font-size: EditorFont.size;
 }
 
 component HistoryPane inherits VerticalLayout {
@@ -529,8 +535,8 @@ component EditorPane inherits Rectangle {
             vertical-stretch: 1;
             text <=> root.text;
             wrap: word-wrap;
-            font-family: "monospace";
-            font-size: 14px;
+            font-family: EditorFont.family;
+            font-size: EditorFont.size;
             edited(t) => { root.edited(t); }
         }
         if !root.show-history && root.preview: PreviewView {
@@ -564,6 +570,9 @@ component SettingsPane inherits Rectangle {
     in-out property <string> author-email;
     in-out property <string> device;
     in-out property <string> notes-dir;
+    in-out property <string> editor-font;
+    in-out property <string> editor-font-size;
+    in property <string> default-font;
     in property <bool> show-notes-dir;
     in property <string> public-key;
     in property <string> key-fingerprint;
@@ -624,6 +633,21 @@ component SettingsPane inherits Rectangle {
                 label: "Notes folder (applies after restart)";
                 value <=> root.notes-dir;
             }
+            HorizontalLayout {
+                spacing: 8px;
+                Field {
+                    horizontal-stretch: 3;
+                    label: "Editor font (empty: \{root.default-font})";
+                    placeholder: root.default-font;
+                    value <=> root.editor-font;
+                }
+                Field {
+                    horizontal-stretch: 1;
+                    label: "Size";
+                    placeholder: "14";
+                    value <=> root.editor-font-size;
+                }
+            }
             Text {
                 text: "SSH public key: add it to your git host as a deploy key with write access";
                 font-size: 12px;
@@ -634,14 +658,14 @@ component SettingsPane inherits Rectangle {
                 text: root.public-key;
                 read-only: true;
                 wrap: word-wrap;
-                font-family: "monospace";
+                font-family: EditorFont.family;
                 font-size: 12px;
                 height: 90px;
             }
             Text {
                 text: root.key-fingerprint;
                 font-size: 11px;
-                font-family: "monospace";
+                font-family: EditorFont.family;
                 color: Palette.foreground.with-alpha(0.6);
                 wrap: word-wrap;
             }
@@ -706,6 +730,9 @@ export component AppWindow inherits Window {
     in-out property <string> cfg-author-email;
     in-out property <string> cfg-device;
     in-out property <string> cfg-notes-dir;
+    in-out property <string> cfg-editor-font;
+    in-out property <string> cfg-editor-font-size;
+    in property <string> default-font;
     in property <string> public-key;
     in property <string> key-fingerprint;
 
@@ -743,6 +770,9 @@ export component AppWindow inherits Window {
             author-email <=> root.cfg-author-email;
             device <=> root.cfg-device;
             notes-dir <=> root.cfg-notes-dir;
+            editor-font <=> root.cfg-editor-font;
+            editor-font-size <=> root.cfg-editor-font-size;
+            default-font: root.default-font;
             show-notes-dir: root.desktop;
             public-key: root.public-key;
             key-fingerprint: root.key-fingerprint;

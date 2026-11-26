@@ -2,6 +2,8 @@ use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 
 const FILE: &str = "config.toml";
+pub const DEFAULT_FONT_SIZE: u32 = 14;
+pub const FONT_SIZES: std::ops::RangeInclusive<u32> = 8..=40;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
@@ -17,6 +19,10 @@ pub struct Config {
     pub sync_interval_secs: u64,
     /// Desktop only: override for the notes folder (applied on restart).
     pub notes_dir: Option<PathBuf>,
+    /// Font family for the editor; empty = the platform's monospace font.
+    pub editor_font: String,
+    /// Editor font size in points.
+    pub editor_font_size: u32,
 }
 
 impl Default for Config {
@@ -29,6 +35,8 @@ impl Default for Config {
             device_name: default_device_name(),
             sync_interval_secs: 300,
             notes_dir: None,
+            editor_font: String::new(),
+            editor_font_size: DEFAULT_FONT_SIZE,
         }
     }
 }
