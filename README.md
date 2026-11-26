@@ -7,7 +7,7 @@ Native markdown notes with automatic git sync, for macOS and Android. It's writt
 - Plain-text editor that autosaves 1 s after you stop typing, plus a native markdown preview.
 - Git sync over SSH, using an ed25519 key the app generates. Sync runs:
   - on startup, on Android resume, and when you tap the status chip
-  - 5 s after a save
+  - 1 min after the last save (each new save restarts the minute)
   - every 5 min
 - **Conflicts never lose data.** If two devices edit the same note, the remote version keeps the name and the local version is saved as `name.conflict-<device>-<timestamp>.md`.
 - **Files and images (Android).** Share files or images to diari from any app, one or several at once. They're saved in today's note's attachment folder (`2026_11_26.md.files/`), and each one adds a line like `- 09:01 [photo.jpg](2026_11_26.md.files/photo.jpg)`.

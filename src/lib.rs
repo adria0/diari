@@ -19,7 +19,9 @@ use sync::auth::{KnownHosts, Keys};
 use sync::{Report, Shared, SyncEngine};
 
 const AUTOSAVE_DELAY: Duration = Duration::from_secs(1);
-const SYNC_AFTER_SAVE_DELAY: Duration = Duration::from_secs(5);
+/// Sync (and commit) this long after the last save, so a writing session
+/// makes one commit per pause of a minute instead of one per short pause.
+const SYNC_AFTER_SAVE_DELAY: Duration = Duration::from_secs(60);
 const HISTORY_LIMIT: usize = 200;
 
 /// Per-note editor state that isn't mirrored in the UI.
