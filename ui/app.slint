@@ -1,4 +1,4 @@
-import { Button, LineEdit, TextEdit, ListView, ScrollView, Palette } from "std-widgets.slint";
+import { Button, LineEdit, TextEdit, ListView, ScrollView, Palette, Switch } from "std-widgets.slint";
 
 export struct NoteItem {
     path: string,
@@ -136,7 +136,9 @@ component ListPane inherits Rectangle {
                 clicked => { root.today(); }
             }
             Button {
-                text: "Settings";
+                icon: @image-url("../icons/gear-64.png");
+                colorize-icon: true;
+                accessible-label: "Settings";
                 clicked => { root.settings(); }
             }
         }
@@ -467,11 +469,14 @@ component EditorPane inherits Rectangle {
     callback back();
     callback delete();
     callback rename(string);
+    // The Delete button is off unless enabled in Settings.
+    in property <bool> show-delete;
     property <bool> confirm-delete: false;
+    property <bool> renaming: false;
 
     changed path => {
-        name.text = root.path;
         root.confirm-delete = false;
+        root.renaming = false;
     }
 
     background: Palette.background;
@@ -484,11 +489,43 @@ component EditorPane inherits Rectangle {
                 text: "‹";
                 clicked => { root.back(); }
             }
-            name := LineEdit {
+            // The note's name; the pencil turns it into a field to rename it.
+            if !root.renaming: Text {
                 text: root.path;
                 horizontal-stretch: 1;
                 min-width: 40px;
-                accepted(t) => { root.rename(t); }
+                vertical-alignment: center;
+                overflow: elide;
+                font-size: 15px;
+                font-weight: 600;
+                color: Palette.foreground;
+            }
+            if !root.renaming: Button {
+                icon: @image-url("../icons/pencil-64.png");
+                colorize-icon: true;
+                icon-size: 16px;
+                accessible-label: "Rename";
+                enabled: !root.show-history;
+                clicked => { root.renaming = true; }
+            }
+            if root.renaming: LineEdit {
+                text: root.path;
+                horizontal-stretch: 1;
+                min-width: 40px;
+                init => {
+                    self.focus();
+                    self.select-all();
+                }
+                accepted(t) => {
+                    root.renaming = false;
+                    if t != root.path {
+                        root.rename(t);
+                    }
+                }
+            }
+            if root.renaming: Button {
+                text: "Cancel";
+                clicked => { root.renaming = false; }
             }
             VerticalLayout {
                 alignment: center;
@@ -508,7 +545,7 @@ component EditorPane inherits Rectangle {
                 enabled: !root.show-history;
                 clicked => { root.open-history(); }
             }
-            Button {
+            if root.show-delete && !root.renaming: Button {
                 text: root.confirm-delete ? "Really?" : "Delete";
                 clicked => {
                     if root.confirm-delete {
@@ -573,6 +610,7 @@ component SettingsPane inherits Rectangle {
     in-out property <string> editor-font;
     in-out property <string> editor-font-size;
     in property <string> default-font;
+    in-out property <bool> show-delete;
     in property <bool> show-notes-dir;
     in property <string> public-key;
     in property <string> key-fingerprint;
@@ -647,6 +685,10 @@ component SettingsPane inherits Rectangle {
                     placeholder: "14";
                     value <=> root.editor-font-size;
                 }
+            }
+            Switch {
+                text: "Show a Delete button on notes";
+                checked <=> root.show-delete;
             }
             Text {
                 text: "SSH public key: add it to your git host as a deploy key with write access";
@@ -733,6 +775,8 @@ export component AppWindow inherits Window {
     in-out property <string> cfg-editor-font;
     in-out property <string> cfg-editor-font-size;
     in property <string> default-font;
+    in-out property <bool> cfg-show-delete;
+    in property <bool> show-delete;
     in property <string> public-key;
     in property <string> key-fingerprint;
 
@@ -773,6 +817,7 @@ export component AppWindow inherits Window {
             editor-font <=> root.cfg-editor-font;
             editor-font-size <=> root.cfg-editor-font-size;
             default-font: root.default-font;
+            show-delete <=> root.cfg-show-delete;
             show-notes-dir: root.desktop;
             public-key: root.public-key;
             key-fingerprint: root.key-fingerprint;
@@ -821,6 +866,7 @@ export component AppWindow inherits Window {
                 history-selected: root.history-selected;
                 history-text: root.history-text;
                 history-diff: root.history-diff;
+                show-delete: root.show-delete;
                 history-side-by-side: root.width >= 1000px;
                 open-history => { root.open-history(); }
                 select-version(id) => { root.select-version(id); }

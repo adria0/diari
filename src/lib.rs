@@ -167,8 +167,9 @@ fn default_mono_font() -> &'static str {
     }
 }
 
-/// Set the editor font from the config.
+/// Apply display settings from the config: editor font, Delete button.
 fn apply_font(ui: &AppWindow, cfg: &Config) {
+    ui.set_show_delete(cfg.show_delete);
     let family = if cfg.editor_font.is_empty() { default_mono_font() } else { cfg.editor_font.as_str() };
     let font = ui.global::<EditorFont>();
     font.set_family(family.into());
@@ -625,6 +626,7 @@ impl App {
         ui.set_cfg_notes_dir(self.shared.notes_dir.display().to_string().into());
         ui.set_cfg_editor_font(cfg.editor_font.clone().into());
         ui.set_cfg_editor_font_size(cfg.editor_font_size.to_string().into());
+        ui.set_cfg_show_delete(cfg.show_delete);
         let keys = self.shared.keys.lock().unwrap();
         ui.set_public_key(keys.public_openssh.clone().into());
         ui.set_key_fingerprint(keys.fingerprint.clone().into());
@@ -648,6 +650,7 @@ impl App {
             .parse()
             .map(|n: u32| n.clamp(*config::FONT_SIZES.start(), *config::FONT_SIZES.end()))
             .unwrap_or(config::DEFAULT_FONT_SIZE);
+        cfg.show_delete = ui.get_cfg_show_delete();
         apply_font(&ui, &cfg);
         let mut restart_needed = false;
         if ui.get_desktop() {

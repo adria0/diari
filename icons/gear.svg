@@ -1,0 +1,20 @@
+<!-- Settings icon: a gear with 8 teeth, white on transparent (colorized in the UI). -->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" width="24" height="24">
+  <defs>
+    <mask id="hole">
+      <rect width="24" height="24" fill="#fff"/>
+      <circle cx="12" cy="12" r="3.2" fill="#000"/>
+    </mask>
+  </defs>
+  <g fill="#fff" mask="url(#hole)">
+    <circle cx="12" cy="12" r="7"/>
+    <g id="t"><rect x="10.3" y="1.5" width="3.4" height="5" rx="0.8"/></g>
+    <use href="#t" transform="rotate(45 12 12)"/>
+    <use href="#t" transform="rotate(90 12 12)"/>
+    <use href="#t" transform="rotate(135 12 12)"/>
+    <use href="#t" transform="rotate(180 12 12)"/>
+    <use href="#t" transform="rotate(225 12 12)"/>
+    <use href="#t" transform="rotate(270 12 12)"/>
+    <use href="#t" transform="rotate(315 12 12)"/>
+  </g>
+</svg>

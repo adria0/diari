@@ -23,6 +23,8 @@ pub struct Config {
     pub editor_font: String,
     /// Editor font size in points.
     pub editor_font_size: u32,
+    /// Show the Delete button on notes (off by default).
+    pub show_delete: bool,
 }
 
 impl Default for Config {
@@ -37,6 +39,7 @@ impl Default for Config {
             notes_dir: None,
             editor_font: String::new(),
             editor_font_size: DEFAULT_FONT_SIZE,
+            show_delete: false,
         }
     }
 }

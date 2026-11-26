@@ -34,4 +34,9 @@ cat > "$RES/values/ic_launcher_background.xml" <<XML
 XML
 
 rsvg-convert -w 256 -h 256 icons/d-icon.svg -o icons/diari-256.png
+
+# Button icons (white on transparent; the UI colorizes them for the theme).
+for i in gear pencil; do
+  rsvg-convert -w 64 -h 64 "icons/$i.svg" -o "icons/$i-64.png"
+done
 echo "icons written to $RES and icons/diari-256.png"
