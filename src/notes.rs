@@ -47,6 +47,61 @@ pub fn list(dir: &Path) -> Vec<NoteInfo> {
     out
 }
 
+/// A note that matches a search, with the first matching line of its text
+/// (`None` when only the file name matched).
+#[derive(Debug, Clone)]
+pub struct SearchHit {
+    pub note: NoteInfo,
+    pub snippet: Option<String>,
+}
+
+const SNIPPET_CHARS: usize = 80;
+
+/// Notes whose path or text contains `query` (case-insensitive), most
+/// recently modified first. An empty query returns every note.
+pub fn search(dir: &Path, query: &str) -> Vec<SearchHit> {
+    let q = query.trim().to_lowercase();
+    list(dir)
+        .into_iter()
+        .filter_map(|note| {
+            if q.is_empty() || note.rel_path.to_lowercase().contains(&q) {
+                return Some(SearchHit { note, snippet: None });
+            }
+            let text = read(dir, &note.rel_path).ok()?;
+            let line = text.lines().find(|l| l.to_lowercase().contains(&q))?;
+            Some(SearchHit { snippet: Some(snippet(line, &q)), note })
+        })
+        .collect()
+}
+
+/// The matching line, trimmed and cut to about `SNIPPET_CHARS` characters
+/// around the match, with `…` where text was cut.
+fn snippet(line: &str, q: &str) -> String {
+    let chars: Vec<char> = line.trim().chars().collect();
+    if chars.len() <= SNIPPET_CHARS {
+        return chars.into_iter().collect();
+    }
+    // Find the match position in characters, comparing case-insensitively.
+    let qlen = q.chars().count();
+    let at = (0..chars.len())
+        .find(|&i| {
+            let end = (i + qlen).min(chars.len());
+            chars[i..end].iter().collect::<String>().to_lowercase().starts_with(q)
+        })
+        .unwrap_or(0);
+    let start = at.saturating_sub(SNIPPET_CHARS / 3).min(chars.len() - SNIPPET_CHARS);
+    let end = start + SNIPPET_CHARS;
+    let mut s = String::new();
+    if start > 0 {
+        s.push('…');
+    }
+    s.extend(&chars[start..end]);
+    if end < chars.len() {
+        s.push('…');
+    }
+    s
+}
+
 fn to_rel_string(p: &Path) -> String {
     p.components()
         .filter_map(|c| match c {
@@ -236,6 +291,43 @@ mod tests {
         assert_eq!(today(d, day).unwrap(), "2026_03_07.md");
         assert_eq!(read(d, "2026_03_07.md").unwrap(), "kept");
         assert_eq!(list(d).len(), 1);
+    }
+
+    #[test]
+    fn search_names_and_text() {
+        let tmp = tempfile::tempdir().unwrap();
+        let d = tmp.path();
+        write(d, "2026_11_26.md", "# Day\n\n- Went to the Conference on AI\n").unwrap();
+        write(d, "ideas.md", "nothing here\n").unwrap();
+        write(d, "sub/conference notes.md", "x\n").unwrap();
+
+        assert_eq!(search(d, "").len(), 3);
+
+        let mut hits: Vec<_> = search(d, "CONFERENCE")
+            .into_iter()
+            .map(|h| (h.note.rel_path, h.snippet))
+            .collect();
+        hits.sort();
+        assert_eq!(
+            hits,
+            vec![
+                ("2026_11_26.md".to_string(), Some("- Went to the Conference on AI".to_string())),
+                ("sub/conference notes.md".to_string(), None),
+            ]
+        );
+        assert!(search(d, "missing").is_empty());
+    }
+
+    #[test]
+    fn snippet_cuts_around_match() {
+        let long = format!("{} needle {}", "a".repeat(100), "b".repeat(100));
+        let s = snippet(&long, "needle");
+        assert!(s.starts_with('…') && s.ends_with('…'), "{s}");
+        assert!(s.contains("needle"));
+        assert_eq!(s.chars().count(), SNIPPET_CHARS + 2);
+        assert_eq!(snippet("  short line  ", "short"), "short line");
+        let accents = format!("{}Café{}", "é".repeat(90), "x".repeat(90));
+        assert!(snippet(&accents, "café").contains("Café"));
     }
 
     #[test]

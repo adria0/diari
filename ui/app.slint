@@ -115,7 +115,7 @@ component ListPane inherits Rectangle {
             }
         }
         LineEdit {
-            placeholder-text: "Search";
+            placeholder-text: "Search names and text";
             text <=> root.filter;
             edited(t) => { root.filter-edited(t); }
         }

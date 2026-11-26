@@ -76,22 +76,20 @@ impl App {
 
     fn refresh_list(&self) {
         let ui = self.ui();
-        let filter = ui.get_filter().to_lowercase();
-        let items: Vec<NoteItem> = notes::list(&self.shared.notes_dir)
+        let items: Vec<NoteItem> = notes::search(&self.shared.notes_dir, &ui.get_filter())
             .into_iter()
-            .filter(|n| filter.is_empty() || n.rel_path.to_lowercase().contains(&filter))
-            .map(|n| {
+            .map(|hit| {
+                let n = hit.note;
                 let modified: chrono::DateTime<chrono::Local> = n.modified.into();
                 let title = n
                     .rel_path
                     .strip_suffix(".md")
                     .unwrap_or(&n.rel_path)
                     .to_string();
-                NoteItem {
-                    path: n.rel_path.into(),
-                    title: title.into(),
-                    subtitle: modified.format("%Y-%m-%d %H:%M").to_string().into(),
-                }
+                let subtitle = hit
+                    .snippet
+                    .unwrap_or_else(|| modified.format("%Y-%m-%d %H:%M").to_string());
+                NoteItem { path: n.rel_path.into(), title: title.into(), subtitle: subtitle.into() }
             })
             .collect();
         ui.set_notes(ModelRc::new(VecModel::from(items)));
