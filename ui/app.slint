@@ -799,13 +799,21 @@ export component AppWindow inherits Window {
     callback filter-edited(string);
     callback back();
 
-    property <bool> wide: root.width >= 720px;
+    // Room taken by the system bars (Android 15+ draws apps edge to edge) and,
+    // when it's up, by the on-screen keyboard, which no longer shrinks the window.
+    property <length> keyboard-top: root.virtual-keyboard-size.height > 0 ? root.virtual-keyboard-position.y : root.height;
+    property <length> inset-top: root.safe-area-insets.top;
+    property <length> inset-bottom: max(root.safe-area-insets.bottom, root.height - root.keyboard-top);
+    property <length> inset-left: root.safe-area-insets.left;
+    property <length> inset-right: root.safe-area-insets.right;
+    property <length> content-width: root.width - root.inset-left - root.inset-right;
+    property <bool> wide: root.content-width >= 720px;
 
     VerticalLayout {
-        x: 0;
-        y: 0;
-        width: root.width;
-        height: root.height;
+        x: root.inset-left;
+        y: root.inset-top;
+        width: root.content-width;
+        height: root.height - root.inset-top - root.inset-bottom;
         if root.show-settings: SettingsPane {
             vertical-stretch: 1;
             remote <=> root.cfg-remote;
@@ -829,7 +837,7 @@ export component AppWindow inherits Window {
         if !root.show-settings: HorizontalLayout {
             vertical-stretch: 1;
             if root.wide || root.current-path == "": ListPane {
-                width: root.wide ? 300px : root.width;
+                width: root.wide ? 300px : root.content-width;
                 notes: root.notes;
                 current: root.current-path;
                 status-text: root.sync-text;
@@ -867,7 +875,7 @@ export component AppWindow inherits Window {
                 history-text: root.history-text;
                 history-diff: root.history-diff;
                 show-delete: root.show-delete;
-                history-side-by-side: root.width >= 1000px;
+                history-side-by-side: root.content-width >= 1000px;
                 open-history => { root.open-history(); }
                 select-version(id) => { root.select-version(id); }
                 restore-version => { root.restore-version(); }
