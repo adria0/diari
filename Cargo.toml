@@ -1,5 +1,5 @@
 [package]
-name = "perb"
+name = "diari"
 version = "0.1.0"
 edition = "2021"
 description = "Native markdown notes with automatic git sync"
@@ -8,7 +8,7 @@ description = "Native markdown notes with automatic git sync"
 crate-type = ["cdylib", "rlib"]
 
 [[bin]]
-name = "perb"
+name = "diari"
 path = "src/main.rs"
 
 [dependencies]
@@ -38,6 +38,8 @@ slint-build = "1.19"
 tempfile = "3"
 
 [package.metadata.android]
+# The app was first called "perb". The package ID stays, so installs update
+# in place and keep their data (SSH key, settings, notes).
 package = "dev.perb.app"
 build_targets = ["aarch64-linux-android"]
 # App icon ("D"), generated from icons/*.svg by scripts/icons.sh.
@@ -51,11 +53,11 @@ target_sdk_version = 34
 name = "android.permission.INTERNET"
 
 [package.metadata.android.application]
-label = "perb"
+label = "diari"
 icon = "@mipmap/ic_launcher"
 
 # Appear in Android's share menu for text (links, selections): the shared text
-# opens perb's quick-add field. The MAIN/LAUNCHER filter is added by cargo-apk.
+# opens diari's quick-add field. The MAIN/LAUNCHER filter is added by cargo-apk.
 [[package.metadata.android.application.activity.intent_filter]]
 actions = ["android.intent.action.SEND"]
 categories = ["android.intent.category.DEFAULT"]

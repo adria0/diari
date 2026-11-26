@@ -373,7 +373,7 @@ fn move_to(repo: &Repository, branch: &str, target: Oid) -> Result<(), git2::Err
     let mut co = CheckoutBuilder::new();
     co.force();
     repo.checkout_tree(commit.as_object(), Some(&mut co))?;
-    repo.reference(&branch_ref(branch), target, true, "perb: sync")?;
+    repo.reference(&branch_ref(branch), target, true, "diari: sync")?;
     Ok(())
 }
 
@@ -483,7 +483,7 @@ fn push(repo: &Repository, p: &Params) -> Result<(), git2::Error> {
     }
     // Record what we pushed so the next sync sees the remote as up to date.
     if let Some(local) = local_tip(repo, p.branch) {
-        repo.reference(&format!("refs/remotes/origin/{}", p.branch), local, true, "perb: push")?;
+        repo.reference(&format!("refs/remotes/origin/{}", p.branch), local, true, "diari: push")?;
     }
     log::info!("pushed");
     Ok(())

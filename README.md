@@ -1,4 +1,4 @@
-# perb
+# diari
 
 Native markdown notes with automatic git sync, for macOS and Android. It's written in Rust, and the UI is Slint (no webview).
 
@@ -14,8 +14,10 @@ Native markdown notes with automatic git sync, for macOS and Android. It's writt
 ## Where things live
 | | macOS | Android |
 |---|---|---|
-| Config, SSH key, known hosts | `~/Library/Application Support/perb/` | app-private storage |
-| Notes | `~/Documents/perb/` (configurable) | app-private `notes/` |
+| Config, SSH key, known hosts | `~/Library/Application Support/diari/` | app-private storage |
+| Notes | `~/Documents/diari/` (configurable) | app-private `notes/` |
+
+diari was first called perb. On macOS, the first launch moves `…/Application Support/perb` and `~/Documents/perb` to the `diari` names if those don't exist yet. On Android the package ID stays `dev.perb.app`, so updates keep the app's data.
 
 ## Setup
 1. Run the app, open **Settings**, and copy the public key.
@@ -37,10 +39,10 @@ rustup target add aarch64-linux-android x86_64-linux-android
 sdkmanager "ndk;30.0.16248370" "build-tools;35.0.0"
 cargo install cargo-apk
 
-scripts/android.sh build                                   # -> target/release/apk/perb.apk
+scripts/android.sh build                                   # -> target/release/apk/diari.apk
 scripts/android.sh run                                     # install + launch on device
 TARGET=x86_64-linux-android scripts/android.sh run         # x86_64 emulator
-adb logcat -s perb
+adb logcat -s diari
 ```
 
 ### Android build notes

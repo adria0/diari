@@ -24,8 +24,8 @@ impl Default for Config {
         Self {
             remote_url: String::new(),
             branch: "main".into(),
-            author_name: "perb".into(),
-            author_email: "perb@localhost".into(),
+            author_name: "diari".into(),
+            author_email: "diari@localhost".into(),
             device_name: default_device_name(),
             sync_interval_secs: 300,
             notes_dir: None,

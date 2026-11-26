@@ -39,7 +39,7 @@ impl SyncEngine {
     ) -> Self {
         let (tx, rx) = mpsc::channel::<()>();
         std::thread::Builder::new()
-            .name("perb-sync".into())
+            .name("diari-sync".into())
             .spawn(move || loop {
                 let interval = shared.config.lock().unwrap().sync_interval_secs.max(30);
                 match rx.recv_timeout(Duration::from_secs(interval)) {

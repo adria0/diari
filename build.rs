@@ -2,7 +2,7 @@ fn main() {
     slint_build::compile("ui/app.slint").expect("failed to compile Slint UI");
 
     // Some native dependencies use the C++ standard library. cargo-apk does not
-    // package libc++_shared.so, so link the NDK's static libc++ into libperb.so.
+    // package libc++_shared.so, so link the NDK's static libc++ into libdiari.so.
     if std::env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("android") {
         println!("cargo:rerun-if-env-changed=ANDROID_NDK_ROOT");
         let ndk = std::env::var("ANDROID_NDK_ROOT")

@@ -1,4 +1,4 @@
-//! Android glue over JNI: the intent perb was started with (share or
+//! Android glue over JNI: the intent diari was started with (share or
 //! quick-add shortcut), the long-press "Quick add" shortcut, and finishing
 //! the activity.
 
@@ -7,6 +7,8 @@ use jni::{JNIEnv, JavaVM};
 use slint::android::AndroidApp;
 
 /// Action of the "Quick add" launcher shortcut.
+/// Tied to the Android package ID, which stays `dev.perb.app` (the app was
+/// first called perb) so that updates keep the installed app's data.
 const QUICK_ADD_ACTION: &str = "dev.perb.app.QUICK_ADD";
 
 /// Run `f` with a JNI env and the activity object. Logs and returns `None`
@@ -42,7 +44,7 @@ fn string_extra(env: &mut JNIEnv, intent: &JObject, key: &str) -> jni::errors::R
     to_string(env, v)
 }
 
-/// If perb was started to quick-add a line, the text to prefill: the shared
+/// If diari was started to quick-add a line, the text to prefill: the shared
 /// text (with its subject, e.g. a page title), or empty for the shortcut.
 pub fn launch_quick_add(app: &AndroidApp) -> Option<String> {
     with_activity(app, |env, activity| {

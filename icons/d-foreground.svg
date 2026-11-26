@@ -1,4 +1,4 @@
-<!-- perb icon foreground: a white "D" inside the 66x66 adaptive-icon safe zone
+<!-- diari icon foreground: a white "D" inside the 66x66 adaptive-icon safe zone
      of a 108x108 canvas. Transparent background (Android adds the backdrop). -->
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 108 108" width="108" height="108">
   <g transform="translate(54 54) scale(1.1) translate(-54 -54)">

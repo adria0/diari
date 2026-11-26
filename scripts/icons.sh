@@ -3,7 +3,7 @@
 #   - Android: adaptive icon (blue background + white "D" foreground, also used
 #     as the monochrome layer for themed icons) and a legacy PNG for older
 #     launchers, under android/res.
-#   - Desktop: icons/perb-256.png, the Slint window icon.
+#   - Desktop: icons/diari-256.png, the Slint window icon.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 RES=android/res
@@ -33,5 +33,5 @@ cat > "$RES/values/ic_launcher_background.xml" <<XML
 </resources>
 XML
 
-rsvg-convert -w 256 -h 256 icons/d-icon.svg -o icons/perb-256.png
-echo "icons written to $RES and icons/perb-256.png"
+rsvg-convert -w 256 -h 256 icons/d-icon.svg -o icons/diari-256.png
+echo "icons written to $RES and icons/diari-256.png"

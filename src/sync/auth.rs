@@ -145,10 +145,10 @@ mod tests {
     #[test]
     fn key_roundtrip_and_tofu() {
         let tmp = tempfile::tempdir().unwrap();
-        let k1 = Keys::load_or_generate(tmp.path(), "perb@test").unwrap();
+        let k1 = Keys::load_or_generate(tmp.path(), "diari@test").unwrap();
         assert!(k1.public_openssh.starts_with("ssh-ed25519 "));
         assert!(k1.private_openssh.contains("OPENSSH PRIVATE KEY"));
-        let k2 = Keys::load_or_generate(tmp.path(), "perb@test").unwrap();
+        let k2 = Keys::load_or_generate(tmp.path(), "diari@test").unwrap();
         assert_eq!(k1.public_openssh, k2.public_openssh);
 
         let kh = KnownHosts::load(tmp.path());

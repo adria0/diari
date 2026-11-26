@@ -418,7 +418,7 @@ impl App {
             Ok(()) => {
                 ui.set_show_settings(false);
                 if restart_needed {
-                    self.show_message("Notes folder changed: restart perb to use it.", 8);
+                    self.show_message("Notes folder changed: restart diari to use it.", 8);
                 }
                 self.engine.request();
             }
@@ -511,7 +511,7 @@ pub fn run(
     let notes_dir = notes_dir(&cfg);
     std::fs::create_dir_all(&notes_dir)?;
     log::info!("data dir {}, notes dir {}", data_dir.display(), notes_dir.display());
-    let keys = Keys::load_or_generate(&data_dir, &format!("perb@{}", cfg.device_name))?;
+    let keys = Keys::load_or_generate(&data_dir, &format!("diari@{}", cfg.device_name))?;
 
     let shared = Arc::new(Shared {
         known_hosts: KnownHosts::load(&data_dir),
@@ -668,7 +668,7 @@ pub fn run(
     ui.on_regenerate_key(|| {
         with_app(|a| {
             let device = a.shared.config.lock().unwrap().device_name.clone();
-            match Keys::generate(&a.shared.data_dir, &format!("perb@{device}")) {
+            match Keys::generate(&a.shared.data_dir, &format!("diari@{device}")) {
                 Ok(k) => {
                     *a.shared.keys.lock().unwrap() = k;
                     a.load_settings_into_ui();
@@ -698,11 +698,11 @@ fn android_main(app: slint::android::AndroidApp) {
     use slint::android::android_activity::{MainEvent, PollEvent};
 
     android_logger::init_once(
-        android_logger::Config::default().with_max_level(log::LevelFilter::Info).with_tag("perb"),
+        android_logger::Config::default().with_max_level(log::LevelFilter::Info).with_tag("diari"),
     );
     let data_dir = app
         .internal_data_path()
-        .unwrap_or_else(|| PathBuf::from("/data/local/tmp/perb"));
+        .unwrap_or_else(|| PathBuf::from("/data/local/tmp/diari"));
     if let Some(text) = android::launch_quick_add(&app) {
         set_launch_quick_add(text);
     }
@@ -712,7 +712,7 @@ fn android_main(app: slint::android::AndroidApp) {
     slint::android::init_with_event_listener(app, move |event| match event {
         PollEvent::Main(MainEvent::Resume { .. }) => request_sync(),
         PollEvent::Main(MainEvent::Pause) | PollEvent::Main(MainEvent::SaveState { .. }) => flush(),
-        // Leaving perb ends this activity: edits are already saved (Pause) and
+        // Leaving diari ends this activity: edits are already saved (Pause) and
         // a sync is queued; the next launch starts fresh with its own intent.
         PollEvent::Main(MainEvent::Stop) => {
             request_sync();
@@ -724,6 +724,6 @@ fn android_main(app: slint::android::AndroidApp) {
 
     let notes = data_dir.join("notes");
     if let Err(e) = run(data_dir, move |_| notes, false) {
-        log::error!("perb exited with error: {e}");
+        log::error!("diari exited with error: {e}");
     }
 }
