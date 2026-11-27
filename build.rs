@@ -1,5 +1,9 @@
 fn main() {
-    slint_build::compile("ui/app.slint").expect("failed to compile Slint UI");
+    // Debug builds keep element info so tests/menu.rs can find and click
+    // the UI's buttons.
+    let debug = std::env::var("PROFILE").as_deref() == Ok("debug");
+    let config = slint_build::CompilerConfiguration::new().with_debug_info(debug);
+    slint_build::compile_with_config("ui/app.slint", config).expect("failed to compile Slint UI");
 
     // Some native dependencies use the C++ standard library. cargo-apk does not
     // package libc++_shared.so, so link the NDK's static libc++ into libdiari.so.

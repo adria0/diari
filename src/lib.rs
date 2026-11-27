@@ -1,4 +1,5 @@
 pub mod attachments;
+pub mod calendar;
 pub mod config;
 #[cfg(target_os = "android")]
 mod android;
@@ -42,11 +43,19 @@ struct App {
     /// Today's note didn't exist at launch: open (and create) it once the
     /// first sync is done, so a copy written on another device comes first.
     open_today_after_sync: Cell<bool>,
+    /// Bumped on each "Check config" and when it closes, so a late report
+    /// from an earlier check isn't shown.
+    check_gen: Cell<u64>,
     /// What was shared to the app at launch, added once the first sync is done.
     pending_share: RefCell<Option<(String, Vec<SharedFile>)>>,
     save_timer: Timer,
     sync_timer: Timer,
     message_timer: Timer,
+}
+
+/// File name of today's daily note.
+fn today_name() -> String {
+    format!("{}.md", chrono::Local::now().format("%Y_%m_%d"))
 }
 
 thread_local! {
@@ -169,9 +178,9 @@ fn default_mono_font() -> &'static str {
     }
 }
 
-/// Apply display settings from the config: editor font, Delete button.
+/// Apply display settings from the config: editor font, advanced mode.
 fn apply_font(ui: &AppWindow, cfg: &Config) {
-    ui.set_show_delete(cfg.show_delete);
+    ui.set_advanced(cfg.advanced);
     let family = if cfg.editor_font.is_empty() { default_mono_font() } else { cfg.editor_font.as_str() };
     let font = ui.global::<EditorFont>();
     font.set_family(family.into());
@@ -212,8 +221,10 @@ impl App {
 
     fn refresh_list(&self) {
         let ui = self.ui();
+        let advanced = ui.get_advanced();
         let items: Vec<NoteItem> = notes::search(&self.shared.notes_dir, &ui.get_filter())
             .into_iter()
+            .filter(|hit| advanced || !calendar::is_config(&hit.note.rel_path))
             .map(|hit| {
                 let n = hit.note;
                 let modified: chrono::DateTime<chrono::Local> = n.modified.into();
@@ -270,10 +281,12 @@ impl App {
                 *self.editor.borrow_mut() = EditorState { path: Some(path.to_string()), saved: text.clone() };
                 self.set_text(&text);
                 ui.set_current_path(path.into());
+                ui.set_current_is_config(calendar::is_config(path));
                 ui.set_dirty(false);
                 ui.set_preview(false);
                 self.close_history();
                 self.close_files();
+                self.close_check();
             }
             Err(e) => self.show_message(format!("Could not open {path}: {e}"), 6),
         }
@@ -283,17 +296,57 @@ impl App {
         *self.editor.borrow_mut() = EditorState::default();
         let ui = self.ui();
         ui.set_current_path(SharedString::new());
+        ui.set_current_is_config(false);
         self.set_text("");
         ui.set_dirty(false);
         ui.set_preview(false);
         self.close_history();
         self.close_files();
+        self.close_check();
+    }
+
+    /// "Check config" on CONFIG.md: show what's wrong with it, or what the
+    /// calendars give. The calendars are fetched in the background.
+    fn check_config(self: &Rc<Self>) {
+        self.save_now();
+        self.close_history();
+        self.close_files();
+        let ui = self.ui();
+        ui.set_check_text("Checking CONFIG.md and loading the calendars…".into());
+        ui.set_show_check(true);
+        let gen = self.check_gen.get() + 1;
+        self.check_gen.set(gen);
+        let dir = self.shared.notes_dir.clone();
+        let day = chrono::Local::now().date_naive();
+        let weak = self.ui.clone();
+        let spawned = std::thread::Builder::new().name("diari-check".into()).spawn(move || {
+            let report = calendar::check(&dir, day);
+            let _ = weak.upgrade_in_event_loop(move |ui| {
+                with_app(|a| {
+                    // Only if this check is still the one shown.
+                    if a.check_gen.get() == gen && ui.get_show_check() {
+                        ui.set_check_text(report.into());
+                    }
+                })
+            });
+        });
+        if let Err(e) = spawned {
+            ui.set_check_text(format!("Could not start the check: {e}").into());
+        }
+    }
+
+    fn close_check(&self) {
+        self.check_gen.set(self.check_gen.get() + 1);
+        let ui = self.ui();
+        ui.set_show_check(false);
+        ui.set_check_text(SharedString::new());
     }
 
     /// Show the files attached to the open note.
     fn open_files(self: &Rc<Self>) {
         self.save_now();
         self.close_history();
+        self.close_check();
         self.fill_files();
         self.ui().set_show_files(true);
     }
@@ -414,8 +467,10 @@ impl App {
     ) -> bool {
         self.save_now();
         let dir = &self.shared.notes_dir;
+        let created_today;
         let res = {
             let _g = self.shared.fs_lock.lock().unwrap();
+            created_today = note.is_none() && !dir.join(today_name()).exists();
             let rel = match note {
                 Some(rel) => Ok(rel),
                 None => notes::today(dir, chrono::Local::now().date_naive()),
@@ -444,6 +499,9 @@ impl App {
                 let what = if n == 1 { String::new() } else { format!("{n} items ") };
                 self.show_message(format!("Added {what}to {rel}"), 4);
                 self.engine.request();
+                if created_today {
+                    self.add_calendar(rel);
+                }
                 true
             }
             Err(e) => {
@@ -555,16 +613,54 @@ impl App {
         }
     }
 
+    /// Add the day's events from the calendars listed in CONFIG.md to the
+    /// new daily note `rel`. They're fetched in the background; the note can
+    /// be used meanwhile.
+    fn add_calendar(self: &Rc<Self>, rel: String) {
+        let sources = match calendar::load_sources(&self.shared.notes_dir) {
+            Ok(s) => s,
+            Err(e) => {
+                self.show_message(e, 10);
+                return;
+            }
+        };
+        if sources.is_empty() {
+            return;
+        }
+        let ui = self.ui.clone();
+        let day = chrono::Local::now().date_naive();
+        let spawned = std::thread::Builder::new().name("diari-calendar".into()).spawn(move || {
+            let (block, errors) = calendar::agenda(&sources, day);
+            let _ = ui.upgrade_in_event_loop(move |_| {
+                with_app(|a| {
+                    if !block.is_empty() {
+                        a.add_to_note(Some(rel), |_, _| Ok(vec![block]));
+                    }
+                    if !errors.is_empty() {
+                        a.show_message(errors.join("\n"), 10);
+                    }
+                })
+            });
+        });
+        if let Err(e) = spawned {
+            self.show_message(format!("Could not load calendars: {e}"), 6);
+        }
+    }
+
     /// Open today's note, creating it if needed.
     fn open_today(self: &Rc<Self>) {
-        let res = {
+        let (res, created) = {
             let _g = self.shared.fs_lock.lock().unwrap();
-            notes::today(&self.shared.notes_dir, chrono::Local::now().date_naive())
+            let created = !self.shared.notes_dir.join(today_name()).exists();
+            (notes::today(&self.shared.notes_dir, chrono::Local::now().date_naive()), created)
         };
         match res {
             Ok(rel) => {
                 self.refresh_list();
                 self.open(&rel);
+                if created {
+                    self.add_calendar(rel);
+                }
             }
             Err(e) => self.show_message(format!("Could not open today's note: {e}"), 6),
         }
@@ -572,7 +668,7 @@ impl App {
 
     /// At launch: open today's note now if it exists, else after the first sync.
     fn open_today_at_launch(self: &Rc<Self>) {
-        let name = format!("{}.md", chrono::Local::now().format("%Y_%m_%d"));
+        let name = today_name();
         if self.shared.notes_dir.join(&name).exists() {
             self.open(&name);
         } else {
@@ -583,6 +679,7 @@ impl App {
     fn open_history(self: &Rc<Self>) {
         self.save_now();
         self.close_files();
+        self.close_check();
         let Some(path) = self.editor.borrow().path.clone() else { return };
         let versions = match sync::git::file_history(&self.shared.notes_dir, &path, HISTORY_LIMIT) {
             Ok(v) => v,
@@ -698,7 +795,7 @@ impl App {
         ui.set_cfg_notes_dir(self.shared.notes_dir.display().to_string().into());
         ui.set_cfg_editor_font(cfg.editor_font.clone().into());
         ui.set_cfg_editor_font_size(cfg.editor_font_size.to_string().into());
-        ui.set_cfg_show_delete(cfg.show_delete);
+        ui.set_cfg_advanced(cfg.advanced);
         let keys = self.shared.keys.lock().unwrap();
         ui.set_public_key(keys.public_openssh.clone().into());
         ui.set_key_fingerprint(keys.fingerprint.clone().into());
@@ -722,8 +819,10 @@ impl App {
             .parse()
             .map(|n: u32| n.clamp(*config::FONT_SIZES.start(), *config::FONT_SIZES.end()))
             .unwrap_or(config::DEFAULT_FONT_SIZE);
-        cfg.show_delete = ui.get_cfg_show_delete();
+        cfg.advanced = ui.get_cfg_advanced();
         apply_font(&ui, &cfg);
+        let hide_config = !cfg.advanced
+            && self.editor.borrow().path.as_deref().is_some_and(calendar::is_config);
         let mut restart_needed = false;
         if ui.get_desktop() {
             let dir = PathBuf::from(ui.get_cfg_notes_dir().trim());
@@ -737,6 +836,11 @@ impl App {
         match res {
             Ok(()) => {
                 ui.set_show_settings(false);
+                if hide_config {
+                    self.save_now();
+                    self.close_editor();
+                }
+                self.refresh_list();
                 if restart_needed {
                     self.show_message("Notes folder changed: restart diari to use it.", 8);
                 }
@@ -874,6 +978,7 @@ pub fn run(
         editor: RefCell::default(),
         history: RefCell::default(),
         open_today_after_sync: Cell::new(false),
+        check_gen: Cell::new(0),
         pending_share: RefCell::default(),
         save_timer: Timer::default(),
         sync_timer: Timer::default(),
@@ -892,6 +997,9 @@ pub fn run(
                 Ok(rel) => {
                     a.refresh_list();
                     a.open(&rel);
+                    if rel == today_name() {
+                        a.add_calendar(rel);
+                    }
                 }
                 Err(e) => a.show_message(format!("Could not create note: {e}"), 6),
             }
@@ -901,6 +1009,8 @@ pub fn run(
     ui.on_open_link(|t| with_app(|a| a.open_link(&t)));
     ui.on_open_files(|| with_app(|a| a.open_files()));
     ui.on_close_files(|| with_app(|a| a.close_files()));
+    ui.on_check_config(|| with_app(|a| a.check_config()));
+    ui.on_close_check(|| with_app(|a| a.close_check()));
     ui.on_open_file(|n| with_app(|a| a.open_attachment(&n)));
     ui.on_delete_file(|n| with_app(|a| a.delete_attachment(&n)));
     ui.on_quick_add(|t| {
@@ -919,9 +1029,11 @@ pub fn run(
             match res {
                 Ok(new) => {
                     a.editor.borrow_mut().path = Some(new.clone());
+                    a.ui().set_current_is_config(calendar::is_config(&new));
                     a.ui().set_current_path(new.into());
                     a.close_history();
                     a.close_files();
+                    a.close_check();
                     a.refresh_list();
                     a.engine.request();
                 }

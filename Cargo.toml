@@ -21,6 +21,10 @@ serde = { version = "1", features = ["derive"] }
 toml = "0.9"
 chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
 log = "0.4"
+ureq = "3"
+rrule = "0.14.0"
+serde_yaml = "0.9"
+chrono-tz = { version = "0.10", default-features = false, features = ["std"] }
 
 [target.'cfg(not(target_os = "android"))'.dependencies]
 # Access to winit's window events, for files dropped from other apps.
@@ -37,6 +41,7 @@ jni = "0.21"
 slint-build = "1.19"
 
 [dev-dependencies]
+i-slint-backend-testing = "=1.19.1"
 tempfile = "3"
 
 [package.metadata.android]

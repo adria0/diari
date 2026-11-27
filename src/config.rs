@@ -23,8 +23,10 @@ pub struct Config {
     pub editor_font: String,
     /// Editor font size in points.
     pub editor_font_size: u32,
-    /// Show the Delete button on notes (off by default).
-    pub show_delete: bool,
+    /// Advanced mode (off by default): shows the Delete button on notes and
+    /// CONFIG.md in the note list. Was `show_delete`.
+    #[serde(alias = "show_delete")]
+    pub advanced: bool,
 }
 
 impl Default for Config {
@@ -39,7 +41,7 @@ impl Default for Config {
             notes_dir: None,
             editor_font: String::new(),
             editor_font_size: DEFAULT_FONT_SIZE,
-            show_delete: false,
+            advanced: false,
         }
     }
 }

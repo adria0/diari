@@ -474,6 +474,36 @@ component FilesPane inherits VerticalLayout {
     }
 }
 
+component CheckPane inherits VerticalLayout {
+    in property <string> text;
+    callback close();
+
+    spacing: 8px;
+    HorizontalLayout {
+        spacing: 8px;
+        Text {
+            text: "Check config";
+            font-size: 14px;
+            font-weight: 600;
+            vertical-alignment: center;
+            color: Palette.foreground;
+            horizontal-stretch: 1;
+        }
+        Button {
+            text: "Close";
+            clicked => { root.close(); }
+        }
+    }
+    TextEdit {
+        vertical-stretch: 1;
+        read-only: true;
+        wrap: word-wrap;
+        text: root.text;
+        font-family: EditorFont.family;
+        font-size: EditorFont.size;
+    }
+}
+
 component HistoryPane inherits VerticalLayout {
     in property <[VersionItem]> versions;
     in property <string> selected;
@@ -564,6 +594,14 @@ component EditorPane inherits Rectangle {
     callback close-files();
     callback open-file(string);
     callback delete-file(string);
+    // CONFIG.md is open: the menu offers "Check config".
+    in property <bool> is-config;
+    in property <bool> show-check;
+    in property <string> check-text;
+    callback check-config();
+    callback close-check();
+    // A pane (history, files, check) is shown instead of the note.
+    property <bool> pane-open: root.show-history || root.show-files || root.show-check;
     in property <[VersionItem]> versions;
     in property <string> history-selected;
     in property <string> history-text;
@@ -579,9 +617,11 @@ component EditorPane inherits Rectangle {
     callback back();
     callback delete();
     callback rename(string);
-    // The Delete button is off unless enabled in Settings.
-    in property <bool> show-delete;
+    // Advanced mode (Settings) adds Delete to the menu.
+    in property <bool> advanced;
     property <bool> confirm-delete: false;
+    // Renaming or confirming a delete: the header shows only that.
+    property <bool> header-busy: root.renaming || root.confirm-delete;
     property <bool> renaming: false;
 
     changed path => {
@@ -595,12 +635,12 @@ component EditorPane inherits Rectangle {
         spacing: 8px;
         header := HorizontalLayout {
             spacing: 8px;
-            if root.show-back && !root.renaming: Button {
+            if root.show-back && !root.header-busy: Button {
                 text: "‹";
                 clicked => { root.back(); }
             }
             // The note's name; the pencil turns it into a field to rename it.
-            if !root.renaming: Text {
+            if !root.header-busy: Text {
                 text: root.path;
                 horizontal-stretch: 1;
                 min-width: 40px;
@@ -629,7 +669,28 @@ component EditorPane inherits Rectangle {
                 text: "Cancel";
                 clicked => { root.renaming = false; }
             }
-            if !root.renaming: VerticalLayout {
+            if root.confirm-delete: Text {
+                text: "Delete \{root.path}?";
+                horizontal-stretch: 1;
+                min-width: 40px;
+                vertical-alignment: center;
+                overflow: elide;
+                font-size: 15px;
+                font-weight: 600;
+                color: Palette.foreground;
+            }
+            if root.confirm-delete: Button {
+                text: "Yes, delete";
+                clicked => {
+                    root.confirm-delete = false;
+                    root.delete();
+                }
+            }
+            if root.confirm-delete: Button {
+                text: "Cancel";
+                clicked => { root.confirm-delete = false; }
+            }
+            if !root.header-busy: VerticalLayout {
                 alignment: center;
                 Text {
                     text: root.dirty ? "●" : " ";
@@ -637,30 +698,24 @@ component EditorPane inherits Rectangle {
                     width: 12px;
                 }
             }
-            if !root.renaming: Button {
+            if !root.header-busy: Button {
                 text: root.preview ? "Edit" : "Preview";
-                enabled: !root.show-history && !root.show-files;
+                enabled: !root.pane-open;
                 clicked => { root.toggle-preview(); }
             }
             // Less-used actions live behind a menu button.
-            if !root.renaming: Button {
+            if !root.header-busy: Button {
                 icon: @image-url("../icons/menu-64.png");
                 colorize-icon: true;
                 icon-size: 18px;
                 accessible-label: "Menu";
                 clicked => { menu.show(); }
             }
-            if root.show-delete && !root.renaming: Button {
-                text: root.confirm-delete ? "Really?" : "Delete";
-                clicked => {
-                    if root.confirm-delete {
-                        root.confirm-delete = false;
-                        root.delete();
-                    } else {
-                        root.confirm-delete = true;
-                    }
-                }
-            }
+        }
+        if root.show-check: CheckPane {
+            vertical-stretch: 1;
+            text: root.check-text;
+            close => { root.close-check(); }
         }
         if root.show-files: FilesPane {
             vertical-stretch: 1;
@@ -680,7 +735,7 @@ component EditorPane inherits Rectangle {
             restore => { root.restore-version(); }
             close => { root.close-history(); }
         }
-        if !root.show-history && !root.show-files && !root.preview: TextEdit {
+        if !root.pane-open && !root.preview: TextEdit {
             vertical-stretch: 1;
             text <=> root.text;
             wrap: word-wrap;
@@ -688,7 +743,7 @@ component EditorPane inherits Rectangle {
             font-size: EditorFont.size;
             edited(t) => { root.edited(t); }
         }
-        if !root.show-history && !root.show-files && root.preview: PreviewView {
+        if !root.pane-open && root.preview: PreviewView {
             vertical-stretch: 1;
             blocks: root.blocks;
             open-link(t) => { root.open-link(t); }
@@ -714,7 +769,7 @@ component EditorPane inherits Rectangle {
                 }
                 Button {
                     text: "History";
-                    enabled: !root.show-history && !root.show-files;
+                    enabled: !root.pane-open;
                     clicked => { root.open-history(); }
                 }
                 Button {
@@ -722,8 +777,21 @@ component EditorPane inherits Rectangle {
                     icon: @image-url("../icons/clip-64.png");
                     colorize-icon: true;
                     icon-size: 16px;
-                    enabled: !root.show-history && !root.show-files;
+                    enabled: !root.pane-open;
                     clicked => { root.open-files(); }
+                }
+                if root.is-config: Button {
+                    text: "Check config";
+                    enabled: !root.pane-open;
+                    clicked => { root.check-config(); }
+                }
+                // Advanced mode only. Asks to confirm in the header.
+                if root.advanced: Button {
+                    text: "Delete";
+                    clicked => {
+                        root.renaming = false;
+                        root.confirm-delete = true;
+                    }
                 }
             }
         }
@@ -756,7 +824,7 @@ component SettingsPane inherits Rectangle {
     in-out property <string> editor-font;
     in-out property <string> editor-font-size;
     in property <string> default-font;
-    in-out property <bool> show-delete;
+    in-out property <bool> advanced;
     in property <bool> show-notes-dir;
     in property <string> public-key;
     in property <string> key-fingerprint;
@@ -833,8 +901,14 @@ component SettingsPane inherits Rectangle {
                 }
             }
             Switch {
-                text: "Show a Delete button on notes";
-                checked <=> root.show-delete;
+                text: "Advanced mode";
+                checked <=> root.advanced;
+            }
+            Text {
+                text: "Adds Delete to the note menu and shows the CONFIG file in the list.";
+                font-size: 12px;
+                wrap: word-wrap;
+                color: Palette.foreground.with-alpha(0.7);
             }
             Text {
                 text: "SSH public key: add it to your git host as a deploy key with write access";
@@ -909,6 +983,11 @@ export component AppWindow inherits Window {
     callback close-files();
     callback open-file(string);
     callback delete-file(string);
+    in property <bool> current-is-config;
+    in-out property <bool> show-check;
+    in property <string> check-text;
+    callback check-config();
+    callback close-check();
     in-out property <string> quick-text;
     in-out property <bool> quick-visible;
     callback quick-add(string);
@@ -927,8 +1006,8 @@ export component AppWindow inherits Window {
     in-out property <string> cfg-editor-font;
     in-out property <string> cfg-editor-font-size;
     in property <string> default-font;
-    in-out property <bool> cfg-show-delete;
-    in property <bool> show-delete;
+    in-out property <bool> cfg-advanced;
+    in property <bool> advanced;
     in property <string> public-key;
     in property <string> key-fingerprint;
 
@@ -977,7 +1056,7 @@ export component AppWindow inherits Window {
             editor-font <=> root.cfg-editor-font;
             editor-font-size <=> root.cfg-editor-font-size;
             default-font: root.default-font;
-            show-delete <=> root.cfg-show-delete;
+            advanced <=> root.cfg-advanced;
             show-notes-dir: root.desktop;
             public-key: root.public-key;
             key-fingerprint: root.key-fingerprint;
@@ -1026,13 +1105,18 @@ export component AppWindow inherits Window {
                 history-selected: root.history-selected;
                 history-text: root.history-text;
                 history-diff: root.history-diff;
-                show-delete: root.show-delete;
+                advanced: root.advanced;
                 show-files: root.show-files;
                 files: root.files;
                 open-files => { root.open-files(); }
                 close-files => { root.close-files(); }
                 open-file(n) => { root.open-file(n); }
                 delete-file(n) => { root.delete-file(n); }
+                is-config: root.current-is-config;
+                show-check: root.show-check;
+                check-text: root.check-text;
+                check-config => { root.check-config(); }
+                close-check => { root.close-check(); }
                 history-side-by-side: root.content-width >= 1000px;
                 open-history => { root.open-history(); }
                 select-version(id) => { root.select-version(id); }
