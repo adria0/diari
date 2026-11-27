@@ -54,38 +54,34 @@ export struct MdBlock {
 }
 
 // state: 0 ok, 1 syncing, 2 error, 3 conflicts, 4 local only
+// The sync button: arrows that are green when synced, red on errors or
+// conflicts, orange and spinning while syncing, grey with no remote.
+// Tap to sync now. `text` ("Synced 12:30", …) is for screen readers.
+// state: 0 ok, 1 syncing, 2 error, 3 conflicts, 4 local only
 component StatusChip inherits Rectangle {
     in property <int> state;
     in property <string> text;
     callback clicked();
-    property <color> dot: state == 2 ? #d64545 : state == 3 ? #e8912d : state == 1 ? #3b82f6 : state == 4 ? #9ca3af : #22a55b;
+    property <color> tint: state == 1 ? #e8912d : state == 2 || state == 3 ? #d64545 : state == 4 ? #9ca3af : #22a55b;
 
-    height: 30px;
-    border-radius: 15px;
-    background: ta.has-hover ? dot.with-alpha(0.28) : dot.with-alpha(0.16);
-    ta := TouchArea {
-        clicked => { root.clicked(); }
+    width: 44px;
+    min-height: 32px;
+    border-radius: 6px;
+    background: ta.pressed ? tint.with-alpha(0.25) : ta.has-hover ? tint.with-alpha(0.15) : transparent;
+    accessible-role: button;
+    accessible-label: root.text;
+    accessible-action-default => { root.clicked(); }
+    Image {
+        source: @image-url("../icons/sync-64.png");
+        colorize: root.tint;
+        width: 22px;
+        height: 22px;
+        // One turn a second while syncing.
+        transform-rotation: root.state == 1 ? Math.mod(animation-tick() / 1ms, 1000) * 0.36deg : 0deg;
     }
-    HorizontalLayout {
-        padding-left: 10px;
-        padding-right: 12px;
-        spacing: 6px;
-        VerticalLayout {
-            alignment: center;
-            Rectangle {
-                width: 8px;
-                height: 8px;
-                border-radius: 4px;
-                background: root.dot;
-            }
-        }
-        Text {
-            text: root.text;
-            vertical-alignment: center;
-            font-size: 12px;
-            color: Palette.foreground;
-            overflow: elide;
-        }
+    ta := TouchArea {
+        mouse-cursor: pointer;
+        clicked => { root.clicked(); }
     }
 }
 
@@ -244,6 +240,7 @@ component ListPane inherits Rectangle {
                 accessible-action-default => { ws-menu.show(); }
                 HorizontalLayout {
                     spacing: 6px;
+                    alignment: start;
                     padding-left: 2px;
                     VerticalLayout {
                         alignment: center;
