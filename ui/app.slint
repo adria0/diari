@@ -12,6 +12,16 @@ export struct DiffRow {
     text: string,
 }
 
+// A file attached to the open note.
+export struct FileItem {
+    name: string,
+    size: string,
+    // Thumbnail, for images; otherwise `ext` (e.g. "PDF") is shown.
+    image: image,
+    is-image: bool,
+    ext: string,
+}
+
 export struct VersionItem {
     id: string,
     title: string,
@@ -370,6 +380,100 @@ component VersionText inherits TextEdit {
     font-size: EditorFont.size;
 }
 
+component FilesPane inherits VerticalLayout {
+    in property <[FileItem]> files;
+    callback open(string);
+    callback delete(string);
+    callback close();
+    // The file whose Delete was tapped once (tap again to confirm).
+    property <string> confirm-delete;
+
+    spacing: 8px;
+    HorizontalLayout {
+        spacing: 8px;
+        Text {
+            text: "Files (\{root.files.length})";
+            font-size: 14px;
+            font-weight: 600;
+            vertical-alignment: center;
+            color: Palette.foreground;
+            horizontal-stretch: 1;
+        }
+        Button {
+            text: "Close";
+            clicked => { root.close(); }
+        }
+    }
+    if root.files.length == 0: Text {
+        text: "No files attached to this note yet. Share files to diari on Android, or drop them on the window on desktop.";
+        wrap: word-wrap;
+        color: Palette.foreground.with-alpha(0.6);
+    }
+    ListView {
+        vertical-stretch: 1;
+        for f in root.files: HorizontalLayout {
+            padding-top: 4px;
+            padding-bottom: 4px;
+            spacing: 10px;
+            Rectangle {
+                width: 52px;
+                height: 52px;
+                border-radius: 4px;
+                clip: true;
+                background: Palette.alternate-background;
+                if f.is-image: Image {
+                    width: parent.width;
+                    height: parent.height;
+                    source: f.image;
+                    image-fit: cover;
+                }
+                if !f.is-image: Text {
+                    text: f.ext;
+                    font-size: 12px;
+                    font-weight: 600;
+                    color: Palette.foreground.with-alpha(0.7);
+                }
+            }
+            VerticalLayout {
+                horizontal-stretch: 1;
+                alignment: center;
+                Text {
+                    text: f.name;
+                    overflow: elide;
+                    color: Palette.foreground;
+                    font-size: 14px;
+                }
+                Text {
+                    text: f.size;
+                    color: Palette.foreground.with-alpha(0.6);
+                    font-size: 12px;
+                }
+            }
+            VerticalLayout {
+                alignment: center;
+                Button {
+                    text: "Open";
+                    clicked => { root.open(f.name); }
+                }
+            }
+            VerticalLayout {
+                alignment: center;
+                Button {
+                    text: root.confirm-delete == f.name ? "Really?" : "Delete";
+                    clicked => {
+                        if root.confirm-delete == f.name {
+                            root.confirm-delete = "";
+                            root.delete(f.name);
+                        } else {
+                            root.confirm-delete = f.name;
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
 component HistoryPane inherits VerticalLayout {
     in property <[VersionItem]> versions;
     in property <string> selected;
@@ -454,6 +558,12 @@ component EditorPane inherits Rectangle {
     in-out property <bool> preview;
     in-out property <string> text;
     in property <bool> show-history;
+    in property <bool> show-files;
+    in property <[FileItem]> files;
+    callback open-files();
+    callback close-files();
+    callback open-file(string);
+    callback delete-file(string);
     in property <[VersionItem]> versions;
     in property <string> history-selected;
     in property <string> history-text;
@@ -537,13 +647,21 @@ component EditorPane inherits Rectangle {
             }
             Button {
                 text: root.preview ? "Edit" : "Preview";
-                enabled: !root.show-history;
+                enabled: !root.show-history && !root.show-files;
                 clicked => { root.toggle-preview(); }
             }
             Button {
                 text: "History";
-                enabled: !root.show-history;
+                enabled: !root.show-history && !root.show-files;
                 clicked => { root.open-history(); }
+            }
+            Button {
+                icon: @image-url("../icons/clip-64.png");
+                colorize-icon: true;
+                icon-size: 18px;
+                accessible-label: "Files";
+                enabled: !root.show-history && !root.show-files;
+                clicked => { root.open-files(); }
             }
             if root.show-delete && !root.renaming: Button {
                 text: root.confirm-delete ? "Really?" : "Delete";
@@ -557,6 +675,13 @@ component EditorPane inherits Rectangle {
                 }
             }
         }
+        if root.show-files: FilesPane {
+            vertical-stretch: 1;
+            files: root.files;
+            open(n) => { root.open-file(n); }
+            delete(n) => { root.delete-file(n); }
+            close => { root.close-files(); }
+        }
         if root.show-history: HistoryPane {
             vertical-stretch: 1;
             versions: root.versions;
@@ -568,7 +693,7 @@ component EditorPane inherits Rectangle {
             restore => { root.restore-version(); }
             close => { root.close-history(); }
         }
-        if !root.show-history && !root.preview: TextEdit {
+        if !root.show-history && !root.show-files && !root.preview: TextEdit {
             vertical-stretch: 1;
             text <=> root.text;
             wrap: word-wrap;
@@ -576,7 +701,7 @@ component EditorPane inherits Rectangle {
             font-size: EditorFont.size;
             edited(t) => { root.edited(t); }
         }
-        if !root.show-history && root.preview: PreviewView {
+        if !root.show-history && !root.show-files && root.preview: PreviewView {
             vertical-stretch: 1;
             blocks: root.blocks;
             open-link(t) => { root.open-link(t); }
@@ -757,6 +882,12 @@ export component AppWindow inherits Window {
     in property <string> history-selected;
     in property <string> history-text;
     in property <[DiffRow]> history-diff;
+    in-out property <bool> show-files;
+    in property <[FileItem]> files;
+    callback open-files();
+    callback close-files();
+    callback open-file(string);
+    callback delete-file(string);
     in-out property <string> quick-text;
     in-out property <bool> quick-visible;
     callback quick-add(string);
@@ -875,6 +1006,12 @@ export component AppWindow inherits Window {
                 history-text: root.history-text;
                 history-diff: root.history-diff;
                 show-delete: root.show-delete;
+                show-files: root.show-files;
+                files: root.files;
+                open-files => { root.open-files(); }
+                close-files => { root.close-files(); }
+                open-file(n) => { root.open-file(n); }
+                delete-file(n) => { root.delete-file(n); }
                 history-side-by-side: root.content-width >= 1000px;
                 open-history => { root.open-history(); }
                 select-version(id) => { root.select-version(id); }

@@ -13,6 +13,7 @@ Native markdown notes with automatic git sync, for macOS and Android. It's writt
 - **Files and images (Android).** Share files or images to diari from any app, one or several at once. They're saved in today's note's attachment folder (`2026_11_26.md.files/`), and each one adds a line like `- 09:01 [photo.jpg](2026_11_26.md.files/photo.jpg)`.
   - In the preview, linked images are shown, and other links open when you tap them: web links in the browser, files in the app for their type. On Android, a file is first copied to `Download/diari/` so other apps can read it (Android 10 or later).
   - Attachment folders aren't shown in the note list, are synced with git, move when their note is renamed, and are deleted with it.
+  - The 📎 button on a note lists its files (with thumbnails for images) to open or delete them. Deleting a file also removes the note's line that linked to it.
 
 ## Where things live
 | | macOS | Android |

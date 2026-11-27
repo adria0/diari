@@ -77,6 +77,93 @@ pub fn add(notes_dir: &Path, note_rel: &str, src: &Path, name: &str, take: Take)
     Ok(format!("{folder_name}/{candidate}"))
 }
 
+/// A file in a note's attachment folder.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Attachment {
+    pub name: String,
+    pub size: u64,
+    pub path: PathBuf,
+}
+
+/// The files attached to a note, by name. Empty if it has none.
+pub fn list(notes_dir: &Path, note_rel: &str) -> Vec<Attachment> {
+    let Ok(folder) = notes::resolve(notes_dir, &dir_for(note_rel)) else { return Vec::new() };
+    let Ok(rd) = std::fs::read_dir(&folder) else { return Vec::new() };
+    let mut out: Vec<Attachment> = rd
+        .flatten()
+        .filter_map(|e| {
+            let meta = e.metadata().ok()?;
+            let name = e.file_name().to_string_lossy().into_owned();
+            (meta.is_file() && !name.starts_with('.')).then(|| Attachment { name, size: meta.len(), path: e.path() })
+        })
+        .collect();
+    out.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
+    out
+}
+
+/// Delete one attached file (and the folder, if it was the last), and drop
+/// the note's lines that only link to it (`- HH:MM [name](target)`). Returns
+/// the note's new text if it changed.
+pub fn delete(notes_dir: &Path, note_rel: &str, name: &str) -> io::Result<Option<String>> {
+    if name.contains('/') || name.starts_with('.') || name.is_empty() {
+        return Err(io::Error::new(io::ErrorKind::InvalidInput, "bad file name"));
+    }
+    let folder_rel = dir_for(note_rel);
+    let folder = notes::resolve(notes_dir, &folder_rel)?;
+    std::fs::remove_file(folder.join(name))?;
+    if std::fs::read_dir(&folder).map(|mut d| d.next().is_none()).unwrap_or(false) {
+        let _ = std::fs::remove_dir(&folder);
+    }
+    let folder_name = folder_rel.rsplit('/').next().unwrap_or(&folder_rel);
+    let target = format!("{folder_name}/{name}");
+    let text = notes::read(notes_dir, note_rel)?;
+    let kept = remove_link_lines(&text, &target);
+    if kept == text {
+        return Ok(None);
+    }
+    notes::write(notes_dir, note_rel, &kept)?;
+    Ok(Some(kept))
+}
+
+/// `text` without the lines that are only a link to `target`, optionally as
+/// a list item with a time: `- 09:01 [photo.jpg](n.md.files/photo.jpg)`.
+pub fn remove_link_lines(text: &str, target: &str) -> String {
+    let is_link_line = |line: &str| {
+        let mut l = line.trim();
+        l = l.strip_prefix("- ").or_else(|| l.strip_prefix("* ")).unwrap_or(l).trim_start();
+        let b = l.as_bytes();
+        if b.len() > 6 && b[0].is_ascii_digit() && b[1].is_ascii_digit() && b[2] == b':' && b[3].is_ascii_digit() && b[4].is_ascii_digit() && b[5] == b' ' {
+            l = &l[6..];
+        }
+        // What's left must be exactly one link, `[label](target)` or `![..](..)`.
+        let l = l.strip_prefix('!').unwrap_or(l);
+        l.starts_with('[')
+            && l.matches("](").count() == 1
+            && (l.ends_with(&format!("]({target})")) || l.ends_with(&format!("](<{target}>)")))
+    };
+    let mut out: Vec<&str> = text.split('\n').filter(|l| !is_link_line(l)).collect();
+    // Don't leave the note ending in a run of blank lines where the link was.
+    while out.len() > 1 && out[out.len() - 1].is_empty() && out[out.len() - 2].is_empty() {
+        out.pop();
+    }
+    out.join("\n")
+}
+
+/// Human-readable size: `850 B`, `12 KB`, `3.4 MB`.
+pub fn format_size(bytes: u64) -> String {
+    const KB: f64 = 1024.0;
+    let b = bytes as f64;
+    if b < KB {
+        format!("{bytes} B")
+    } else if b < KB * KB {
+        format!("{:.0} KB", b / KB)
+    } else if b < KB * KB * KB {
+        format!("{:.1} MB", b / KB / KB)
+    } else {
+        format!("{:.1} GB", b / KB / KB / KB)
+    }
+}
+
 /// The line added to the note for an attachment: `- HH:MM [name](target)`.
 pub fn link_line(time: chrono::NaiveTime, label: &str, target: &str) -> String {
     let target = if target.contains([' ', '(', ')', '<', '>']) { format!("<{target}>") } else { target.to_string() };
@@ -211,6 +298,35 @@ mod tests {
         std::fs::write(&src, b"img").unwrap();
         assert_eq!(add(d, "2026_11_26.md", &src, "photo.jpg", Take::Copy).unwrap(), "2026_11_26.md.files/photo-3.jpg");
         assert!(src.exists(), "copy keeps the original");
+    }
+
+    #[test]
+    fn list_and_delete() {
+        let tmp = tempfile::tempdir().unwrap();
+        let d = tmp.path();
+        assert!(list(d, "n.md").is_empty());
+        notes::write(d, "n.md", "# n\n\n- 09:01 [b.pdf](n.md.files/b.pdf)\nsee [a](n.md.files/a.jpg) here\n- 09:02 [a.jpg](n.md.files/a.jpg)\n").unwrap();
+        std::fs::create_dir(d.join("n.md.files")).unwrap();
+        std::fs::write(d.join("n.md.files/b.pdf"), b"pdf!").unwrap();
+        std::fs::write(d.join("n.md.files/a.jpg"), b"jpg").unwrap();
+        let names: Vec<_> = list(d, "n.md").into_iter().map(|a| (a.name, a.size)).collect();
+        assert_eq!(names, vec![("a.jpg".into(), 3), ("b.pdf".into(), 4)]);
+
+        // The link line goes; a link inside other text stays.
+        let text = delete(d, "n.md", "a.jpg").unwrap().unwrap();
+        assert_eq!(text, "# n\n\n- 09:01 [b.pdf](n.md.files/b.pdf)\nsee [a](n.md.files/a.jpg) here\n");
+        assert!(!d.join("n.md.files/a.jpg").exists());
+
+        delete(d, "n.md", "b.pdf").unwrap();
+        assert!(!d.join("n.md.files").exists(), "empty folder removed");
+        assert!(delete(d, "n.md", "../n.md").is_err());
+    }
+
+    #[test]
+    fn sizes() {
+        assert_eq!(format_size(850), "850 B");
+        assert_eq!(format_size(12 * 1024), "12 KB");
+        assert_eq!(format_size(3_565_158), "3.4 MB");
     }
 
     #[test]

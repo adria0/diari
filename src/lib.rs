@@ -273,6 +273,7 @@ impl App {
                 ui.set_dirty(false);
                 ui.set_preview(false);
                 self.close_history();
+                self.close_files();
             }
             Err(e) => self.show_message(format!("Could not open {path}: {e}"), 6),
         }
@@ -286,6 +287,74 @@ impl App {
         ui.set_dirty(false);
         ui.set_preview(false);
         self.close_history();
+        self.close_files();
+    }
+
+    /// Show the files attached to the open note.
+    fn open_files(self: &Rc<Self>) {
+        self.save_now();
+        self.close_history();
+        self.fill_files();
+        self.ui().set_show_files(true);
+    }
+
+    fn fill_files(&self) {
+        let Some(note) = self.editor.borrow().path.clone() else { return };
+        let items: Vec<FileItem> = attachments::list(&self.shared.notes_dir, &note)
+            .into_iter()
+            .map(|a| {
+                let image = if attachments::is_image(&a.name) {
+                    slint::Image::load_from_path(&a.path).ok()
+                } else {
+                    None
+                };
+                let ext = a.name.rsplit_once('.').map(|(_, e)| e.to_uppercase()).unwrap_or_default();
+                FileItem {
+                    is_image: image.is_some(),
+                    image: image.unwrap_or_default(),
+                    size: attachments::format_size(a.size).into(),
+                    ext: ext.chars().take(4).collect::<String>().into(),
+                    name: a.name.into(),
+                }
+            })
+            .collect();
+        self.ui().set_files(ModelRc::new(VecModel::from(items)));
+    }
+
+    fn close_files(&self) {
+        let ui = self.ui();
+        ui.set_show_files(false);
+        ui.set_files(ModelRc::default());
+    }
+
+    fn open_attachment(self: &Rc<Self>, name: &str) {
+        let Some(note) = self.editor.borrow().path.clone() else { return };
+        let path = attachments::dir_for(&note);
+        let target = format!("{}/{name}", path.rsplit('/').next().unwrap_or(&path));
+        self.open_link(&target);
+    }
+
+    /// Delete an attached file, and the note's line that linked to it.
+    fn delete_attachment(self: &Rc<Self>, name: &str) {
+        let Some(note) = self.editor.borrow().path.clone() else { return };
+        self.save_now();
+        let res = {
+            let _g = self.shared.fs_lock.lock().unwrap();
+            attachments::delete(&self.shared.notes_dir, &note, name)
+        };
+        match res {
+            Ok(new_text) => {
+                if let Some(text) = new_text {
+                    self.editor.borrow_mut().saved = text.clone();
+                    self.set_text(&text);
+                }
+                self.fill_files();
+                self.refresh_list();
+                self.show_message(format!("Deleted {name}"), 4);
+                self.engine.request();
+            }
+            Err(e) => self.show_message(format!("Could not delete {name}: {e}"), 6),
+        }
     }
 
     /// Replace the editor's whole text (opening, restoring, reloading).
@@ -513,6 +582,7 @@ impl App {
 
     fn open_history(self: &Rc<Self>) {
         self.save_now();
+        self.close_files();
         let Some(path) = self.editor.borrow().path.clone() else { return };
         let versions = match sync::git::file_history(&self.shared.notes_dir, &path, HISTORY_LIMIT) {
             Ok(v) => v,
@@ -829,6 +899,10 @@ pub fn run(
     });
     ui.on_open_today(|| with_app(|a| a.open_today()));
     ui.on_open_link(|t| with_app(|a| a.open_link(&t)));
+    ui.on_open_files(|| with_app(|a| a.open_files()));
+    ui.on_close_files(|| with_app(|a| a.close_files()));
+    ui.on_open_file(|n| with_app(|a| a.open_attachment(&n)));
+    ui.on_delete_file(|n| with_app(|a| a.delete_attachment(&n)));
     ui.on_quick_add(|t| {
         with_app(|a| {
             a.quick_add(&t);
@@ -847,6 +921,7 @@ pub fn run(
                     a.editor.borrow_mut().path = Some(new.clone());
                     a.ui().set_current_path(new.into());
                     a.close_history();
+                    a.close_files();
                     a.refresh_list();
                     a.engine.request();
                 }
