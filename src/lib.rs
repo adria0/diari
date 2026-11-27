@@ -2,6 +2,7 @@ pub mod attachments;
 pub mod calendar;
 pub mod config;
 pub mod images;
+pub mod links;
 #[cfg(target_os = "android")]
 mod android;
 pub mod markdown;
@@ -12,7 +13,7 @@ pub mod voice;
 slint::include_modules!();
 
 use config::Config;
-use slint::{ComponentHandle, ModelRc, SharedString, Timer, TimerMode, VecModel};
+use slint::{ComponentHandle, Model, ModelRc, SharedString, Timer, TimerMode, VecModel};
 use std::cell::{Cell, RefCell};
 use std::path::PathBuf;
 use std::rc::Rc;
@@ -72,6 +73,10 @@ struct App {
     #[cfg_attr(not(target_os = "android"), allow(dead_code))]
     pending_photo: RefCell<Option<(String, Option<String>)>>,
     /// Decoded preview pictures. Local files are keyed with their mtime.
+    /// A `[[…` link being typed: where its name starts and the cursor.
+    link_query: Cell<Option<(usize, usize)>>,
+    /// Bumped to move the editor's cursor (see `cursor-request`).
+    cursor_request: Cell<i32>,
     pictures: RefCell<std::collections::HashMap<(images::Source, Option<std::time::SystemTime>), Picture>>,
     /// What was shared to the app at launch, added once the first sync is done.
     pending_share: RefCell<Option<(String, Vec<SharedFile>)>>,
@@ -333,6 +338,8 @@ impl App {
                 self.close_history();
                 self.close_files();
                 self.close_check();
+                self.clear_link_suggestions();
+                self.update_backlinks();
             }
             Err(e) => self.show_message(format!("Could not open {path}: {e}"), 6),
         }
@@ -349,6 +356,8 @@ impl App {
         self.close_history();
         self.close_files();
         self.close_check();
+        self.clear_link_suggestions();
+        self.update_backlinks();
     }
 
     /// "Check config" on CONFIG.md: show what's wrong with it, or what the
@@ -890,6 +899,10 @@ impl App {
     /// A link in the preview was tapped: open the web page, or the attached
     /// file with the system's app for it.
     fn open_link(self: &Rc<Self>, target: &str) {
+        if let Some(name) = target.strip_prefix("[[").and_then(|t| t.strip_suffix("]]")) {
+            self.open_wikilink(name);
+            return;
+        }
         let res = if attachments::is_url(target) {
             platform_open_url(target)
         } else {
@@ -901,6 +914,86 @@ impl App {
         };
         if let Err(e) = res {
             self.show_message(format!("Could not open: {e}"), 6);
+        }
+    }
+
+    /// The notes linking to the open one, for the row under the editor.
+    fn update_backlinks(&self) {
+        let note = self.editor.borrow().path.clone();
+        let mut names: Vec<SharedString> = Vec::new();
+        if let Some(note) = note {
+            for b in links::backlinks(&self.shared.notes_dir, &note) {
+                let name: SharedString = b.from.strip_suffix(".md").unwrap_or(&b.from).into();
+                if !names.contains(&name) {
+                    names.push(name);
+                }
+            }
+        }
+        self.ui().set_backlinks(ModelRc::new(VecModel::from(names)));
+    }
+
+    /// After each change in the editor: offer note names while a `[[…` link
+    /// is being typed.
+    fn link_typed(&self, text: &str, cursor: usize, preedit: &str) {
+        match links::pending_query(text, cursor) {
+            Some((start, typed)) => {
+                let rels: Vec<String> =
+                    notes::list(&self.shared.notes_dir).into_iter().map(|n| n.rel_path).collect();
+                let names = links::suggestions(&rels, &format!("{typed}{preedit}"), 8);
+                self.link_query.set(Some((start, cursor)));
+                let names: Vec<SharedString> = names.into_iter().map(Into::into).collect();
+                self.ui().set_link_suggestions(ModelRc::new(VecModel::from(names)));
+            }
+            None => self.clear_link_suggestions(),
+        }
+    }
+
+    fn clear_link_suggestions(&self) {
+        self.link_query.set(None);
+        let ui = self.ui();
+        if ui.get_link_suggestions().row_count() > 0 {
+            ui.set_link_suggestions(ModelRc::default());
+        }
+    }
+
+    /// A suggestion was tapped: finish the link with it.
+    fn pick_link(self: &Rc<Self>, name: &str) {
+        let Some((start, cursor)) = self.link_query.get() else { return };
+        let text = self.ui().get_editor_text().to_string();
+        if start > cursor || cursor > text.len() || !text.is_char_boundary(start) || !text.is_char_boundary(cursor) {
+            self.clear_link_suggestions();
+            return;
+        }
+        let (new, pos) = links::complete(&text, start, cursor, name);
+        self.set_text(&new);
+        self.mark_edited();
+        self.clear_link_suggestions();
+        let ui = self.ui();
+        ui.set_cursor_request_pos(pos as i32);
+        self.cursor_request.set(self.cursor_request.get() + 1);
+        ui.set_cursor_request(self.cursor_request.get());
+    }
+
+    /// `[[name]]` was tapped: open that note, creating it if there's none.
+    fn open_wikilink(self: &Rc<Self>, name: &str) {
+        let name = name.split(['#', '|']).next().unwrap_or(name).trim();
+        let rels: Vec<String> = notes::list(&self.shared.notes_dir).into_iter().map(|n| n.rel_path).collect();
+        if let Some(rel) = links::resolve(name, rels.iter().map(String::as_str)) {
+            self.open(&rel);
+            return;
+        }
+        let res = {
+            let _g = self.shared.fs_lock.lock().unwrap();
+            notes::create(&self.shared.notes_dir, name)
+        };
+        match res {
+            Ok(rel) => {
+                self.refresh_list();
+                self.open(&rel);
+                self.show_message(format!("Created {rel}"), 4);
+                self.engine.request();
+            }
+            Err(e) => self.show_message(format!("Could not create {name}: {e}"), 6),
         }
     }
 
@@ -1080,6 +1173,23 @@ impl App {
                 }
             })
             .collect();
+        let mut blocks = blocks;
+        // Notes that link here, each with the line that does.
+        let back = if note.is_empty() { Vec::new() } else { links::backlinks(&self.shared.notes_dir, &note) };
+        if !back.is_empty() {
+            let block = |kind: i32, text: String, target: String| MdBlock {
+                kind,
+                text: text.into(),
+                target: target.into(),
+                ..Default::default()
+            };
+            blocks.push(block(markdown::Kind::Rule.code(), String::new(), String::new()));
+            blocks.push(block(markdown::Kind::Heading(3).code(), format!("Linked from ({})", back.len()), String::new()));
+            for b in back {
+                let name = b.from.strip_suffix(".md").unwrap_or(&b.from).to_string();
+                blocks.push(block(markdown::Kind::Link.code(), format!("{name}: {}", links::plain(&b.line)), format!("[[{name}]]")));
+            }
+        }
         ui.set_blocks(ModelRc::new(VecModel::from(blocks)));
     }
 
@@ -1298,6 +1408,8 @@ impl App {
     /// Files may have changed on disk: refresh the list and the open note.
     fn reload_after_sync(self: &Rc<Self>) {
         self.refresh_list();
+        // Another device may have added links to the open note.
+        self.update_backlinks();
         let ui = self.ui();
         let path = self.editor.borrow().path.clone();
         let Some(path) = path else { return };
@@ -1373,6 +1485,8 @@ pub fn run(
         voice_timer: Timer::default(),
         pending_photo: RefCell::default(),
         pictures: RefCell::default(),
+        link_query: Cell::new(None),
+        cursor_request: Cell::new(0),
         pending_share: RefCell::default(),
         save_timer: Timer::default(),
         sync_timer: Timer::default(),
@@ -1404,6 +1518,8 @@ pub fn run(
     ui.on_open_files(|| with_app(|a| a.open_files()));
     ui.on_close_files(|| with_app(|a| a.close_files()));
     ui.on_check_config(|| with_app(|a| a.check_config()));
+    ui.on_link_typed(|t, c, p| with_app(|a| a.link_typed(&t, c.max(0) as usize, &p)));
+    ui.on_pick_link(|n| with_app(|a| a.pick_link(&n)));
     ui.on_toggle_task(|pos| with_app(|a| a.toggle_task(pos.max(0) as usize)));
     ui.on_voice_record(|into_note| with_app(|a| a.voice_record(into_note)));
     ui.on_take_photo(|into_note| with_app(|a| a.take_photo(into_note)));
@@ -1433,7 +1549,27 @@ pub fn run(
             };
             match res {
                 Ok(new) => {
+                    // Point [[old]] links in other notes at the new name.
+                    let relinked = {
+                        let _g = a.shared.fs_lock.lock().unwrap();
+                        links::rename(&a.shared.notes_dir, &old, &new)
+                    };
+                    match relinked {
+                        Ok(changed) if !changed.is_empty() => {
+                            if changed.contains(&new) {
+                                if let Ok(t) = notes::read(&a.shared.notes_dir, &new) {
+                                    a.editor.borrow_mut().saved = t.clone();
+                                    a.set_text(&t);
+                                }
+                            }
+                            let n = changed.len();
+                            a.show_message(format!("Updated the links in {n} note{}", if n == 1 { "" } else { "s" }), 4);
+                        }
+                        Ok(_) => {}
+                        Err(e) => a.show_message(format!("Renamed, but could not update links: {e}"), 8),
+                    }
                     a.editor.borrow_mut().path = Some(new.clone());
+                    a.update_backlinks();
                     a.ui().set_current_is_config(calendar::is_config(&new));
                     a.ui().set_current_path(new.into());
                     a.close_history();

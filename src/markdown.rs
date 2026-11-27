@@ -1,6 +1,6 @@
 //! Markdown -> flat list of styled blocks rendered by native Slint widgets.
 
-use pulldown_cmark::{Event, HeadingLevel, Options, Parser, Tag, TagEnd};
+use pulldown_cmark::{Event, HeadingLevel, LinkType, Options, Parser, Tag, TagEnd};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Kind {
@@ -113,7 +113,8 @@ pub fn parse(src: &str) -> Vec<Block> {
     let opts = Options::ENABLE_TABLES
         | Options::ENABLE_TASKLISTS
         | Options::ENABLE_STRIKETHROUGH
-        | Options::ENABLE_FOOTNOTES;
+        | Options::ENABLE_FOOTNOTES
+        | Options::ENABLE_WIKILINKS;
     let mut s = State {
         out: Vec::new(),
         buf: String::new(),
@@ -171,6 +172,10 @@ pub fn parse(src: &str) -> Vec<Block> {
                 Tag::TableHead | Tag::TableRow => {
                     s.flush();
                     s.cur = Some((Kind::Code, s.indent()));
+                }
+                // A link to a note: its target is kept as `[[Name]]`.
+                Tag::Link { link_type: LinkType::WikiLink { .. }, dest_url, .. } => {
+                    s.start_link(&format!("[[{dest_url}]]"), false)
                 }
                 Tag::Link { dest_url, .. } => s.start_link(&dest_url, false),
                 Tag::Image { dest_url, .. } => s.start_link(&dest_url, true),
@@ -333,6 +338,14 @@ mod tests {
         assert_eq!(b.iter().filter(|b| b.kind == Kind::Para).count(), 2);
         let links: Vec<_> = b.iter().filter(|b| b.kind == Kind::Link).map(|b| (b.target.as_str(), b.image)).collect();
         assert_eq!(links, vec![("https://x.y/cat", true), ("b.png", true), ("a.pdf", false)]);
+    }
+
+    #[test]
+    fn note_links() {
+        let b = parse("Anar a [[Montjoia]] amb [[Aran|l'Aran]]\n");
+        assert_eq!(b[0].text, "Anar a Montjoia amb l'Aran");
+        let links: Vec<_> = b.iter().filter(|b| b.kind == Kind::Link).map(|b| (b.text.as_str(), b.target.as_str())).collect();
+        assert_eq!(links, vec![("Montjoia", "[[Montjoia]]"), ("l'Aran", "[[Aran]]")]);
     }
 
     #[test]

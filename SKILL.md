@@ -18,6 +18,7 @@ If `$DIARI_REPO` is unset, ask the user for it. If git fails with a permission e
 - `- HH:MM text` lines are things jotted, shared or dictated at that time.
 - `## Calendar` lists that day's events; `## To do` lists calendar tasks. `- [ ]` is pending, `- [x]` done.
 - Attachments are in `<note>.md.files/`.
+- `[[Name]]` or `[[Name|text]]` links to the note `Name.md` (by file name, or path for subfolders). To find what mentions a note, grep for `[[Name`.
 - Search with `grep -rni --include='*.md' --exclude=CONFIG.md "<text>" "$D"`.
 
 Rules: read only, never edit, commit or push. Never show `CONFIG.md` (it may hold private calendar links). Say which day each thing comes from. Answer in the user's language.

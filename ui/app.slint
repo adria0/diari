@@ -643,6 +643,18 @@ component HistoryPane inherits VerticalLayout {
 component NoteEditor inherits Rectangle {
     in-out property <string> text <=> input.text;
     callback edited(string);
+    // After each change: the text, the cursor (byte offset) and the word
+    // the keyboard is still composing (not in the text yet).
+    callback typed(string, int, string);
+    // Bump `cursor-request` to put the cursor at `cursor-request-pos`.
+    in property <int> cursor-request;
+    in property <int> cursor-request-pos;
+    property <string> preedit: input.preedit-text;
+    changed preedit => { root.typed(input.text, input.cursor-position-byte-offset, input.preedit-text); }
+    changed cursor-request => {
+        input.set-selection-offsets(root.cursor-request-pos, root.cursor-request-pos);
+        input.focus();
+    }
     forward-focus: input;
 
     background: Palette.color-scheme == ColorScheme.dark ? #ffffff0f : #FCF6E5;
@@ -701,7 +713,10 @@ component NoteEditor inherits Rectangle {
                 selection-foreground-color: Palette.selection-foreground;
                 page-height: scroll.visible-height;
                 accessible-role: none;
-                edited => { root.edited(self.text); }
+                edited => {
+                    root.edited(self.text);
+                    root.typed(self.text, self.cursor-position-byte-offset, self.preedit-text);
+                }
                 // Keep the cursor in view (as the standard TextEdit does).
                 cursor-position-changed(cpos) => {
                     if (cpos.y + scroll.content-y < 0px) {
@@ -711,6 +726,58 @@ component NoteEditor inherits Rectangle {
                     }
                 }
             }
+        }
+    }
+}
+
+// A small tappable label. Unlike a Button it doesn't take the focus, so the
+// editor (and the phone's keyboard) stay as they are.
+component Chip inherits Rectangle {
+    in property <string> text;
+    callback clicked();
+    height: 30px;
+    min-width: label.preferred-width + 20px;
+    max-width: 240px;
+    border-radius: 15px;
+    background: ta.pressed ? Palette.accent-background.with-alpha(0.3) : Palette.accent-background.with-alpha(0.14);
+    accessible-role: button;
+    accessible-label: root.text;
+    accessible-action-default => { root.clicked(); }
+    label := Text {
+        x: 10px;
+        width: parent.width - 20px;
+        text: root.text;
+        overflow: elide;
+        vertical-alignment: center;
+        color: Palette.foreground;
+        font-size: 13px;
+    }
+    ta := TouchArea {
+        mouse-cursor: pointer;
+        clicked => { root.clicked(); }
+    }
+}
+
+// Chips in a row that scrolls sideways when they don't fit.
+component ChipRow inherits Flickable {
+    in property <string> title;
+    in property <[string]> items;
+    callback picked(string);
+    height: 30px;
+    content-width: max(self.width, row.preferred-width);
+    interactive: true;
+    row := HorizontalLayout {
+        spacing: 6px;
+        alignment: start;
+        if root.title != "": Text {
+            text: root.title;
+            vertical-alignment: center;
+            color: Palette.foreground.with-alpha(0.6);
+            font-size: 13px;
+        }
+        for item in root.items: Chip {
+            text: item;
+            clicked => { root.picked(item); }
         }
     }
 }
@@ -738,6 +805,13 @@ component EditorPane inherits Rectangle {
     callback voice();
     callback photo();
     in property <bool> can-photo;
+    // Links: notes to offer while typing `[[…`, notes linking to this one.
+    in property <[string]> link-suggestions;
+    in property <[string]> backlinks;
+    callback link-typed(string, int, string);
+    callback pick-link(string);
+    in property <int> cursor-request;
+    in property <int> cursor-request-pos;
     // A pane (history, files, check) is shown instead of the note.
     property <bool> pane-open: root.show-history || root.show-files || root.show-check;
     in property <[VersionItem]> versions;
@@ -874,10 +948,22 @@ component EditorPane inherits Rectangle {
             restore => { root.restore-version(); }
             close => { root.close-history(); }
         }
+        if !root.pane-open && !root.preview && root.link-suggestions.length > 0: ChipRow {
+            items: root.link-suggestions;
+            picked(n) => { root.pick-link(n); }
+        }
         if !root.pane-open && !root.preview: NoteEditor {
             vertical-stretch: 1;
             text <=> root.text;
+            cursor-request: root.cursor-request;
+            cursor-request-pos: root.cursor-request-pos;
             edited(t) => { root.edited(t); }
+            typed(t, c, p) => { root.link-typed(t, c, p); }
+        }
+        if !root.pane-open && !root.preview && root.backlinks.length > 0: ChipRow {
+            title: "Linked from:";
+            items: root.backlinks;
+            picked(n) => { root.open-link("[[" + n + "]]"); }
         }
         if !root.pane-open && root.preview: PreviewView {
             vertical-stretch: 1;
@@ -1209,6 +1295,12 @@ export component AppWindow inherits Window {
     callback rename-note(string);
     callback delete-note();
     callback text-edited(string);
+    in property <[string]> link-suggestions;
+    in property <[string]> backlinks;
+    callback link-typed(string, int, string);
+    callback pick-link(string);
+    in property <int> cursor-request;
+    in property <int> cursor-request-pos;
     callback preview-toggled();
     callback open-link(string);
     callback toggle-task(int);
@@ -1317,6 +1409,12 @@ export component AppWindow inherits Window {
                 preview <=> root.preview;
                 text <=> root.editor-text;
                 edited(t) => { root.text-edited(t); }
+                link-suggestions: root.link-suggestions;
+                backlinks: root.backlinks;
+                link-typed(t, c, p) => { root.link-typed(t, c, p); }
+                pick-link(n) => { root.pick-link(n); }
+                cursor-request: root.cursor-request;
+                cursor-request-pos: root.cursor-request-pos;
                 toggle-preview => { root.preview-toggled(); }
                 open-link(t) => { root.open-link(t); }
                 toggle-task(p) => { root.toggle-task(p); }
