@@ -121,6 +121,9 @@ component ListPane inherits Rectangle {
     callback create(string);
     callback today();
     callback voice();
+    callback photo();
+    // Android: a camera button to add a picture to today's note.
+    in property <bool> can-photo;
     callback sync-now();
     callback settings();
     callback filter-edited(string);
@@ -173,6 +176,12 @@ component ListPane inherits Rectangle {
             }
             RecordButton {
                 clicked => { root.voice(); }
+            }
+            if root.can-photo: Button {
+                icon: @image-url("../icons/camera-64.png");
+                colorize-icon: true;
+                accessible-label: "Photo";
+                clicked => { root.photo(); }
             }
             Button {
                 icon: @image-url("../icons/gear-64.png");
@@ -727,6 +736,8 @@ component EditorPane inherits Rectangle {
     callback check-config();
     callback close-check();
     callback voice();
+    callback photo();
+    in property <bool> can-photo;
     // A pane (history, files, check) is shown instead of the note.
     property <bool> pane-open: root.show-history || root.show-files || root.show-check;
     in property <[VersionItem]> versions;
@@ -899,6 +910,13 @@ component EditorPane inherits Rectangle {
                     colorize-icon: true;
                     icon-size: 16px;
                     clicked => { root.voice(); }
+                }
+                if root.can-photo: Button {
+                    text: "Photo";
+                    icon: @image-url("../icons/camera-64.png");
+                    colorize-icon: true;
+                    icon-size: 16px;
+                    clicked => { root.photo(); }
                 }
                 Button {
                     text: "History";
@@ -1147,6 +1165,11 @@ export component AppWindow inherits Window {
     in property <string> voice-text;
     // into-note: add the text to the open note (else to today's).
     callback voice-record(bool);
+    // Take a picture with the camera app (Android); into-note as above.
+    callback take-photo(bool);
+    // Android back gesture / Escape, given whether the layout is wide;
+    // false when there's nothing to go back to.
+    callback back-pressed(bool) -> bool;
     callback voice-stop();
     callback voice-cancel();
     callback voice-download();
@@ -1210,11 +1233,31 @@ export component AppWindow inherits Window {
     property <length> content-width: root.width - root.inset-left - root.inset-right;
     property <bool> wide: root.content-width >= 720px;
 
-    VerticalLayout {
+    // Catches Android's back gesture (and Escape) when no field takes it.
+    // It takes the focus back whenever the screen changes, since the key
+    // only reaches it through the focused element.
+    init => { keys.focus(); }
+    changed current-path => { keys.focus(); }
+    changed preview => { keys.focus(); }
+    changed show-settings => { keys.focus(); }
+    changed show-files => { keys.focus(); }
+    changed show-history => { keys.focus(); }
+    changed show-check => { keys.focus(); }
+    keys := FocusScope {
         x: root.inset-left;
         y: root.inset-top;
         width: root.content-width;
         height: root.height - root.inset-top - root.inset-bottom;
+        key-pressed(event) => {
+            if (event.text == Key.Back || event.text == Key.Escape) && root.back-pressed(root.wide) {
+                self.focus();
+                return accept;
+            }
+            reject
+        }
+    VerticalLayout {
+        width: parent.width;
+        height: parent.height;
         if root.show-settings: SettingsPane {
             vertical-stretch: 1;
             remote <=> root.cfg-remote;
@@ -1254,6 +1297,8 @@ export component AppWindow inherits Window {
                 create(n) => { root.new-note(n); }
                 today => { root.open-today(); }
                 voice => { root.voice-record(false); }
+                photo => { root.take-photo(false); }
+                can-photo: !root.desktop;
                 sync-now => { root.sync-now(); }
                 settings => { root.open-settings(); }
                 filter-edited(t) => { root.filter-edited(t); }
@@ -1266,7 +1311,8 @@ export component AppWindow inherits Window {
                 horizontal-stretch: 1;
                 path: root.current-path;
                 dirty: root.dirty;
-                show-back: !root.wide;
+                // Android has its back gesture; a narrow desktop window needs a button.
+                show-back: !root.wide && root.desktop;
                 blocks: root.blocks;
                 preview <=> root.preview;
                 text <=> root.editor-text;
@@ -1292,6 +1338,8 @@ export component AppWindow inherits Window {
                 check-config => { root.check-config(); }
                 close-check => { root.close-check(); }
                 voice => { root.voice-record(true); }
+                photo => { root.take-photo(true); }
+                can-photo: !root.desktop;
                 history-side-by-side: root.content-width >= 1000px;
                 open-history => { root.open-history(); }
                 select-version(id) => { root.select-version(id); }
@@ -1363,5 +1411,6 @@ export component AppWindow inherits Window {
                 }
             }
         }
+    }
     }
 }

@@ -466,6 +466,108 @@ pub fn finish(app: &AndroidApp) {
     with_activity(app, |env, activity| env.call_method(activity, "finish", "()V", &[]).map(|_| ()));
 }
 
+fn sdk_int(env: &mut JNIEnv) -> i32 {
+    env.get_static_field("android/os/Build$VERSION", "SDK_INT", "I").and_then(|v| v.i()).unwrap_or(0)
+}
+
+/// Open the camera app to take a picture into a new gallery item named
+/// `name` (in Pictures/diari). Returns that item's URI, to import the
+/// picture when diari comes back (`import_photo`).
+pub fn take_photo(name: &str) -> Result<String, String> {
+    const FLAG_GRANT_READ_WRITE: i32 = 0x1 | 0x2;
+    let app = current_app()?;
+    let res = with_activity(&app, |env, activity| {
+        let resolver = content_resolver(env, activity)?;
+        let collection = env
+            .get_static_field("android/provider/MediaStore$Images$Media", "EXTERNAL_CONTENT_URI", "Landroid/net/Uri;")?
+            .l()?;
+        let values = env.new_object("android/content/ContentValues", "()V", &[])?;
+        let mut put = |env: &mut JNIEnv, k: &str, v: &str| -> jni::errors::Result<()> {
+            let (k, v) = (env.new_string(k)?, env.new_string(v)?);
+            env.call_method(&values, "put", "(Ljava/lang/String;Ljava/lang/String;)V", &[
+                JValue::Object(&k),
+                JValue::Object(&v),
+            ])?;
+            Ok(())
+        };
+        put(env, "_display_name", name)?;
+        put(env, "mime_type", "image/jpeg")?;
+        if sdk_int(env) >= 29 {
+            put(env, "relative_path", "Pictures/diari")?;
+        }
+        let uri = env
+            .call_method(&resolver, "insert", "(Landroid/net/Uri;Landroid/content/ContentValues;)Landroid/net/Uri;", &[
+                JValue::Object(&collection),
+                JValue::Object(&values),
+            ])?
+            .l()?;
+        if uri.is_null() {
+            return Ok(Err("could not make room for the picture".to_string()));
+        }
+        let action = env.new_string("android.media.action.IMAGE_CAPTURE")?;
+        let intent = env.new_object("android/content/Intent", "(Ljava/lang/String;)V", &[JValue::Object(&action)])?;
+        let key = env.new_string("output")?;
+        env.call_method(&intent, "putExtra", "(Ljava/lang/String;Landroid/os/Parcelable;)Landroid/content/Intent;", &[
+            JValue::Object(&key),
+            JValue::Object(&uri),
+        ])?;
+        env.call_method(&intent, "addFlags", "(I)Landroid/content/Intent;", &[JValue::Int(FLAG_GRANT_READ_WRITE)])?;
+        if start_activity(env, activity, &intent).is_err() {
+            // No camera app: drop the empty gallery item again.
+            let _ = env.exception_clear();
+            let _ = env.call_method(&resolver, "delete", "(Landroid/net/Uri;Ljava/lang/String;[Ljava/lang/String;)I", &[
+                JValue::Object(&uri),
+                JValue::Object(&JObject::null()),
+                JValue::Object(&JObject::null()),
+            ]);
+            return Ok(Err("no camera app found".to_string()));
+        }
+        let s = env.call_method(&uri, "toString", "()Ljava/lang/String;", &[])?.l()?;
+        Ok(to_string(env, s)?.ok_or_else(|| "no picture address".to_string()))
+    });
+    res.unwrap_or_else(|| Err("could not open the camera".into()))
+}
+
+/// After the camera: copy the picture at `uri` into `staging` and remove it
+/// from the gallery (it lives in the note now). `None` if no picture was
+/// taken.
+pub fn import_photo(uri: &str, staging: &Path) -> Result<Option<SharedFile>, String> {
+    let app = current_app()?;
+    let res = with_activity(&app, |env, activity| {
+        let s = env.new_string(uri)?;
+        let u = env
+            .call_static_method("android/net/Uri", "parse", "(Ljava/lang/String;)Landroid/net/Uri;", &[JValue::Object(&s)])?
+            .l()?;
+        let copied = copy_shared(env, activity, &u, staging, 0);
+        if env.exception_check()? {
+            env.exception_clear()?;
+        }
+        let resolver = content_resolver(env, activity)?;
+        let _ = env.call_method(&resolver, "delete", "(Landroid/net/Uri;Ljava/lang/String;[Ljava/lang/String;)I", &[
+            JValue::Object(&u),
+            JValue::Object(&JObject::null()),
+            JValue::Object(&JObject::null()),
+        ]);
+        Ok(copied)
+    });
+    match res {
+        Some(Ok(f)) => {
+            if std::fs::metadata(&f.path).map(|m| m.len()).unwrap_or(0) == 0 {
+                let _ = std::fs::remove_file(&f.path);
+                Ok(None)
+            } else {
+                Ok(Some(f))
+            }
+        }
+        // Cancelled: the camera never wrote the picture.
+        Some(Err(e)) => {
+            log::info!("no picture from the camera: {e}");
+            Ok(None)
+        }
+        None => Err("could not read the picture".into()),
+    }
+}
+
 const RECORD_AUDIO: &str = "android.permission.RECORD_AUDIO";
 
 /// Ok if diari may use the microphone. If not, ask for it (Android shows

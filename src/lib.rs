@@ -67,6 +67,10 @@ struct App {
     check_gen: Cell<u64>,
     voice: RefCell<Voice>,
     voice_timer: Timer,
+    /// A picture being taken with the camera app: its gallery URI and the
+    /// note it goes to (today's when `None`). Imported when diari resumes.
+    #[cfg_attr(not(target_os = "android"), allow(dead_code))]
+    pending_photo: RefCell<Option<(String, Option<String>)>>,
     /// Decoded preview pictures. Local files are keyed with their mtime.
     pictures: RefCell<std::collections::HashMap<(images::Source, Option<std::time::SystemTime>), Picture>>,
     /// What was shared to the app at launch, added once the first sync is done.
@@ -232,6 +236,15 @@ pub fn request_sync() {
     with_app(|a| a.engine.request());
 }
 
+/// Android resume: sync, and bring in a picture taken with the camera.
+pub fn on_resume() {
+    with_app(|a| {
+        a.engine.request();
+        #[cfg(target_os = "android")]
+        a.import_photo();
+    });
+}
+
 /// Flush pending edits to disk (e.g. Android pause).
 pub fn flush() {
     with_app(|a| a.save_now());
@@ -366,6 +379,80 @@ impl App {
         if let Err(e) = spawned {
             ui.set_check_text(format!("Could not start the check: {e}").into());
         }
+    }
+
+    /// Camera button (or "Photo" in a note's menu, `into_note`): open the
+    /// camera app; the picture is added when diari comes back.
+    fn take_photo(self: &Rc<Self>, into_note: bool) {
+        #[cfg(target_os = "android")]
+        {
+            self.save_now();
+            let into = if into_note { self.editor.borrow().path.clone() } else { None };
+            let name = format!("diari-{}.jpg", chrono::Local::now().format("%Y%m%d-%H%M%S"));
+            match android::take_photo(&name) {
+                Ok(uri) => *self.pending_photo.borrow_mut() = Some((uri, into)),
+                Err(e) => self.show_message(format!("Could not take a picture: {e}"), 6),
+            }
+        }
+        #[cfg(not(target_os = "android"))]
+        {
+            let _ = into_note;
+            self.show_message("Taking pictures works on Android; on desktop, drop pictures on the window.", 6);
+        }
+    }
+
+    /// Back from the camera app: add the picture (if one was taken) to its
+    /// note's attachments with a `- HH:MM [name](…)` line.
+    #[cfg(target_os = "android")]
+    fn import_photo(self: &Rc<Self>) {
+        let Some((uri, into)) = self.pending_photo.borrow_mut().take() else { return };
+        let staging = self.shared.data_dir.join("incoming");
+        match android::import_photo(&uri, &staging) {
+            Ok(Some(f)) => {
+                let time = chrono::Local::now().time();
+                self.add_to_note(into, |dir, rel| {
+                    let target = attachments::add(dir, rel, &f.path, &f.name, attachments::Take::Move)?;
+                    let label = target.rsplit('/').next().unwrap_or(&target).to_string();
+                    Ok(vec![attachments::link_line(time, &label, &target)])
+                });
+            }
+            Ok(None) => {}
+            Err(e) => self.show_message(format!("Could not add the picture: {e}"), 8),
+        }
+    }
+
+    /// Android's back gesture (or Escape): step back one level. False when
+    /// there's nowhere to go back to, so Android leaves the app.
+    fn back_pressed(self: &Rc<Self>, wide: bool) -> bool {
+        let ui = self.ui();
+        match *self.voice.borrow() {
+            Voice::AskDownload { .. } | Voice::Recording { .. } => {}
+            Voice::Working => return true,
+            Voice::Idle => {
+                return self.back_from_screen(&ui, wide);
+            }
+        }
+        self.voice_cancel();
+        true
+    }
+
+    fn back_from_screen(self: &Rc<Self>, ui: &AppWindow, wide: bool) -> bool {
+        if ui.get_show_settings() {
+            ui.set_show_settings(false);
+        } else if ui.get_show_check() {
+            self.close_check();
+        } else if ui.get_show_files() {
+            self.close_files();
+        } else if ui.get_show_history() {
+            self.close_history();
+        } else if !wide && !ui.get_current_path().is_empty() {
+            self.save_now();
+            self.close_editor();
+            self.refresh_list();
+        } else {
+            return false;
+        }
+        true
     }
 
     fn set_voice(&self, state: i32, text: impl Into<SharedString>) {
@@ -1284,6 +1371,7 @@ pub fn run(
         check_gen: Cell::new(0),
         voice: RefCell::new(Voice::Idle),
         voice_timer: Timer::default(),
+        pending_photo: RefCell::default(),
         pictures: RefCell::default(),
         pending_share: RefCell::default(),
         save_timer: Timer::default(),
@@ -1318,6 +1406,12 @@ pub fn run(
     ui.on_check_config(|| with_app(|a| a.check_config()));
     ui.on_toggle_task(|pos| with_app(|a| a.toggle_task(pos.max(0) as usize)));
     ui.on_voice_record(|into_note| with_app(|a| a.voice_record(into_note)));
+    ui.on_take_photo(|into_note| with_app(|a| a.take_photo(into_note)));
+    ui.on_back_pressed(|wide| {
+        let mut handled = false;
+        with_app(|a| handled = a.back_pressed(wide));
+        handled
+    });
     ui.on_voice_stop(|| with_app(|a| a.voice_stop()));
     ui.on_voice_cancel(|| with_app(|a| a.voice_cancel()));
     ui.on_voice_download(|| with_app(|a| a.voice_download()));
@@ -1465,7 +1559,7 @@ fn android_main(app: slint::android::AndroidApp) {
 
     let app_for_events = app.clone();
     slint::android::init_with_event_listener(app, move |event| match event {
-        PollEvent::Main(MainEvent::Resume { .. }) => request_sync(),
+        PollEvent::Main(MainEvent::Resume { .. }) => on_resume(),
         PollEvent::Main(MainEvent::Pause) | PollEvent::Main(MainEvent::SaveState { .. }) => flush(),
         // Leaving diari ends this activity: edits are already saved (Pause) and
         // a sync is queued; the next launch starts fresh with its own intent.
