@@ -35,6 +35,12 @@ env_logger = "0.11"
 dirs = "6"
 cpal = "0.16"
 
+[target.'cfg(target_os = "macos")'.dependencies]
+# Dock icon: macOS has no per-window icons, so Slint's Window.icon is ignored.
+objc2 = "0.6"
+objc2-foundation = { version = "0.3", default-features = false, features = ["std", "NSData"] }
+objc2-app-kit = { version = "0.3", default-features = false, features = ["std", "NSApplication", "NSResponder", "NSImage"] }
+
 [target.'cfg(target_os = "android")'.dependencies]
 slint = { version = "1.19", features = ["backend-android-activity-06"] }
 android_logger = "0.15"

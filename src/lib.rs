@@ -5,6 +5,8 @@ pub mod images;
 pub mod links;
 #[cfg(target_os = "android")]
 mod android;
+#[cfg(target_os = "macos")]
+mod macos;
 pub mod markdown;
 pub mod notes;
 pub mod sync;
@@ -1604,6 +1606,8 @@ pub fn run(
     });
 
     let ui = AppWindow::new()?;
+    #[cfg(target_os = "macos")]
+    let _ = slint::invoke_from_event_loop(macos::set_dock_icon);
     ui.set_desktop(desktop);
     ui.set_default_font(default_mono_font().into());
     apply_font(&ui, &shared.config.lock().unwrap());
