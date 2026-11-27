@@ -32,6 +32,8 @@ pub struct Config {
     pub voice_language: String,
     /// Colors: `auto` (follow the system), `light` or `dark`.
     pub theme: String,
+    /// The workspace shown on this device (a folder; empty for all).
+    pub workspace: String,
 }
 
 impl Default for Config {
@@ -49,6 +51,7 @@ impl Default for Config {
             advanced: false,
             voice_language: "ca".into(),
             theme: "auto".into(),
+            workspace: crate::workspaces::JOURNAL.into(),
         }
     }
 }

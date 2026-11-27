@@ -231,16 +231,17 @@ pub fn create(dir: &Path, name: &str) -> io::Result<String> {
 /// `yyyy_mm_dd.md` already exists in the notes folder.
 pub fn default_new_name(dir: &Path, today: chrono::NaiveDate) -> String {
     let name = today.format("%Y_%m_%d").to_string();
-    if dir.join(format!("{name}.md")).exists() {
+    if dir.join(crate::workspaces::in_journal(dir, &format!("{name}.md"))).exists() {
         String::new()
     } else {
         name
     }
 }
 
-/// Path of today's note (`yyyy_mm_dd.md`), creating it if it doesn't exist.
+/// Path of today's note (`yyyy_mm_dd.md`, in the journal workspace),
+/// creating it if it doesn't exist.
 pub fn today(dir: &Path, today: chrono::NaiveDate) -> io::Result<String> {
-    let name = format!("{}.md", today.format("%Y_%m_%d"));
+    let name = crate::workspaces::in_journal(dir, &format!("{}.md", today.format("%Y_%m_%d")));
     if resolve(dir, &name)?.exists() {
         Ok(name)
     } else {

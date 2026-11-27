@@ -58,11 +58,13 @@ fn flatten(entries: Vec<Entry>, out: &mut Vec<Source>) {
 
 /// Is note `rel` the `CONFIG.md` at the top of the notes folder?
 pub fn is_config(rel: &str) -> bool {
-    rel.eq_ignore_ascii_case("config.md")
+    // At the top, or a workspace's (`feina/CONFIG.md`).
+    let file = rel.rsplit('/').next().unwrap_or(rel);
+    file.eq_ignore_ascii_case("config.md") && rel.matches('/').count() <= 1
 }
 
 /// `CONFIG.md` in the notes folder, whatever the case of its name.
-fn config_path(dir: &Path) -> Option<PathBuf> {
+pub fn config_path(dir: &Path) -> Option<PathBuf> {
     std::fs::read_dir(dir)
         .ok()?
         .flatten()
@@ -93,6 +95,11 @@ pub fn parse_sources(text: &str) -> Result<Vec<Source>, String> {
 
 /// The first ```yaml block under the `# cal` heading.
 fn cal_yaml(text: &str) -> Option<String> {
+    yaml_section(text, "cal")
+}
+
+/// The first ```yaml block under the `# <title>` heading of a CONFIG.md.
+pub fn yaml_section(text: &str, title: &str) -> Option<String> {
     let (mut in_cal, mut in_block) = (false, false);
     let mut out = String::new();
     for line in text.lines() {
@@ -104,7 +111,7 @@ fn cal_yaml(text: &str) -> Option<String> {
             out.push_str(line);
             out.push('\n');
         } else if t.starts_with('#') {
-            in_cal = t.trim_start_matches('#').trim().eq_ignore_ascii_case("cal");
+            in_cal = t.trim_start_matches('#').trim().eq_ignore_ascii_case(title);
         } else if in_cal && (t.eq_ignore_ascii_case("```yaml") || t.eq_ignore_ascii_case("```yml")) {
             in_block = true;
         }

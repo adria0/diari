@@ -9,6 +9,7 @@ pub mod markdown;
 pub mod notes;
 pub mod sync;
 pub mod voice;
+pub mod workspaces;
 
 slint::include_modules!();
 
@@ -75,6 +76,8 @@ struct App {
     /// Decoded preview pictures. Local files are keyed with their mtime.
     /// A `[[…` link being typed: where its name starts and the cursor.
     link_query: Cell<Option<(usize, usize)>>,
+    /// "Later" was tapped on the offer to move the notes into diari/.
+    migration_later: Cell<bool>,
     /// Bumped to move the editor's cursor (see `cursor-request`).
     cursor_request: Cell<i32>,
     pictures: RefCell<std::collections::HashMap<(images::Source, Option<std::time::SystemTime>), Picture>>,
@@ -85,9 +88,9 @@ struct App {
     message_timer: Timer,
 }
 
-/// File name of today's daily note.
-fn today_name() -> String {
-    format!("{}.md", chrono::Local::now().format("%Y_%m_%d"))
+/// Path of today's daily note (in the journal workspace).
+fn today_name(notes_dir: &std::path::Path) -> String {
+    workspaces::in_journal(notes_dir, &format!("{}.md", chrono::Local::now().format("%Y_%m_%d")))
 }
 
 thread_local! {
@@ -270,20 +273,141 @@ impl App {
         });
     }
 
+    /// The workspace shown: a folder, or `""` for all of them (and before
+    /// there are workspaces).
+    fn active_workspace(&self) -> String {
+        let dir = &self.shared.notes_dir;
+        if !workspaces::enabled(dir) {
+            return String::new();
+        }
+        let ws = self.shared.config.lock().unwrap().workspace.clone();
+        if ws.is_empty() || workspaces::list(dir).iter().any(|w| w.folder == ws) {
+            ws
+        } else {
+            workspaces::JOURNAL.into()
+        }
+    }
+
+    /// The workspace menu, the header's name and colour, and the offer to
+    /// move the notes into diari/.
+    fn refresh_workspaces(&self) {
+        const COLORS: [u32; 6] = [0x3b82f6, 0x22a55b, 0xe8912d, 0xa855f7, 0xe11d48, 0x0ea5e9];
+        let ui = self.ui();
+        let dir = &self.shared.notes_dir;
+        let active = self.active_workspace();
+        let items: Vec<WorkspaceItem> = workspaces::list(dir)
+            .into_iter()
+            .enumerate()
+            .map(|(i, w)| WorkspaceItem {
+                color: w
+                    .color
+                    .as_deref()
+                    .and_then(|c| u32::from_str_radix(c.trim().trim_start_matches('#'), 16).ok())
+                    .map_or(slint::Color::from_argb_encoded(0xff00_0000 | COLORS[i % COLORS.len()]), |c| {
+                        slint::Color::from_argb_encoded(0xff00_0000 | c)
+                    }),
+                folder: w.folder.into(),
+                name: w.name.into(),
+            })
+            .collect();
+        let current = items.iter().find(|w| w.folder.as_str() == active);
+        ui.set_active_name(current.map_or("All".into(), |w| w.name.clone()));
+        ui.set_active_color(current.map_or(slint::Color::from_argb_encoded(0), |w| w.color));
+        ui.set_active_workspace(active.clone().into());
+        ui.set_has_workspaces(!items.is_empty());
+        ui.set_workspaces(ModelRc::new(VecModel::from(items)));
+        ui.set_needs_migration(!self.migration_later.get() && workspaces::needs_migration(dir));
+    }
+
+    fn select_workspace(&self, folder: &str) {
+        let mut cfg = self.shared.config.lock().unwrap();
+        cfg.workspace = folder.to_string();
+        if let Err(e) = cfg.save(&self.shared.data_dir) {
+            log::warn!("could not save the workspace: {e}");
+        }
+        drop(cfg);
+        self.refresh_list();
+    }
+
+    fn new_workspace(self: &Rc<Self>, name: &str) {
+        let res = {
+            let _g = self.shared.fs_lock.lock().unwrap();
+            workspaces::create(&self.shared.notes_dir, name)
+        };
+        match res {
+            Ok(folder) => {
+                self.select_workspace(&folder);
+                self.engine.request();
+            }
+            Err(e) => self.show_message(format!("Could not create the workspace: {e}"), 6),
+        }
+    }
+
+    /// Move the notes at the top into diari/ (once, when asked).
+    fn migrate(self: &Rc<Self>) {
+        self.save_now();
+        let res = {
+            let _g = self.shared.fs_lock.lock().unwrap();
+            workspaces::migrate_root(&self.shared.notes_dir)
+        };
+        match res {
+            Ok(n) => {
+                self.moved_into_journal();
+                self.select_workspace(workspaces::JOURNAL);
+                self.engine.request();
+                self.show_message(format!("Moved {n} notes and folders into diari/"), 6);
+            }
+            Err(e) => self.show_message(format!("Could not move the notes: {e}"), 10),
+        }
+    }
+
+    /// Notes from the top went into diari/: follow the open one.
+    fn moved_into_journal(&self) {
+        let open = self.editor.borrow().path.clone();
+        if let Some(p) = open.filter(|p| !p.contains('/')) {
+            let new = format!("{}/{p}", workspaces::JOURNAL);
+            if let Ok(t) = notes::read(&self.shared.notes_dir, &new) {
+                *self.editor.borrow_mut() = EditorState { path: Some(new.clone()), saved: t.clone() };
+                self.set_text(&t);
+                self.ui().set_current_path(new.into());
+                self.ui().set_dirty(false);
+            }
+        }
+    }
+
+    /// Notes that turned up at the top again (from a device with an older
+    /// diari) go into diari/.
+    fn adopt_strays(self: &Rc<Self>) {
+        let res = {
+            let _g = self.shared.fs_lock.lock().unwrap();
+            workspaces::adopt_strays(&self.shared.notes_dir)
+        };
+        match res {
+            Ok(moved) if !moved.is_empty() => {
+                self.moved_into_journal();
+                self.show_message(format!("Moved into diari/: {}", moved.join(", ")), 8);
+                self.engine.request();
+            }
+            Ok(_) => {}
+            Err(e) => self.show_message(format!("Could not move notes into diari/: {e}"), 8),
+        }
+    }
+
     fn refresh_list(&self) {
+        self.refresh_workspaces();
         let ui = self.ui();
         let advanced = ui.get_advanced();
+        let ws = self.active_workspace();
+        let prefix = format!("{ws}/");
         let items: Vec<NoteItem> = notes::search(&self.shared.notes_dir, &ui.get_filter())
             .into_iter()
             .filter(|hit| advanced || !calendar::is_config(&hit.note.rel_path))
+            .filter(|hit| ws.is_empty() || hit.note.rel_path.starts_with(&prefix))
             .map(|hit| {
                 let n = hit.note;
                 let modified: chrono::DateTime<chrono::Local> = n.modified.into();
-                let title = n
-                    .rel_path
-                    .strip_suffix(".md")
-                    .unwrap_or(&n.rel_path)
-                    .to_string();
+                let shown = if ws.is_empty() { n.rel_path.as_str() } else { &n.rel_path[prefix.len()..] };
+                let title = shown.strip_suffix(".md").unwrap_or(shown).to_string();
                 let subtitle = hit
                     .snippet
                     .unwrap_or_else(|| modified.format("%Y-%m-%d %H:%M").to_string());
@@ -291,9 +415,13 @@ impl App {
             })
             .collect();
         ui.set_notes(ModelRc::new(VecModel::from(items)));
-        ui.set_default_new_name(
-            notes::default_new_name(&self.shared.notes_dir, chrono::Local::now().date_naive()).into(),
-        );
+        // Daily notes live in the journal: only suggest one's name there.
+        let in_journal = ws.is_empty() || ws == workspaces::JOURNAL;
+        ui.set_default_new_name(if in_journal {
+            notes::default_new_name(&self.shared.notes_dir, chrono::Local::now().date_naive()).into()
+        } else {
+            SharedString::new()
+        });
     }
 
     fn save_now(&self) {
@@ -371,7 +499,9 @@ impl App {
         ui.set_show_check(true);
         let gen = self.check_gen.get() + 1;
         self.check_gen.set(gen);
-        let dir = self.shared.notes_dir.clone();
+        // The open CONFIG.md's folder: the top, or a workspace.
+        let open = self.editor.borrow().path.clone().unwrap_or_default();
+        let dir = self.shared.notes_dir.join(workspaces::folder_of(&open));
         let day = chrono::Local::now().date_naive();
         let weak = self.ui.clone();
         let spawned = std::thread::Builder::new().name("diari-check".into()).spawn(move || {
@@ -770,7 +900,7 @@ impl App {
         let created_today;
         let res = {
             let _g = self.shared.fs_lock.lock().unwrap();
-            created_today = note.is_none() && !dir.join(today_name()).exists();
+            created_today = note.is_none() && !dir.join(today_name(dir)).exists();
             let rel = match note {
                 Some(rel) => Ok(rel),
                 None => notes::today(dir, chrono::Local::now().date_naive()),
@@ -939,7 +1069,8 @@ impl App {
             Some((start, typed)) => {
                 let rels: Vec<String> =
                     notes::list(&self.shared.notes_dir).into_iter().map(|n| n.rel_path).collect();
-                let names = links::suggestions(&rels, &format!("{typed}{preedit}"), 8);
+                let ws = self.editor.borrow().path.as_deref().map(workspaces::folder_of).unwrap_or("").to_string();
+                let names = links::suggestions(&rels, &format!("{typed}{preedit}"), 8, &ws);
                 self.link_query.set(Some((start, cursor)));
                 let names: Vec<SharedString> = names.into_iter().map(Into::into).collect();
                 self.ui().set_link_suggestions(ModelRc::new(VecModel::from(names)));
@@ -978,13 +1109,22 @@ impl App {
     fn open_wikilink(self: &Rc<Self>, name: &str) {
         let name = name.split(['#', '|']).next().unwrap_or(name).trim();
         let rels: Vec<String> = notes::list(&self.shared.notes_dir).into_iter().map(|n| n.rel_path).collect();
-        if let Some(rel) = links::resolve(name, rels.iter().map(String::as_str)) {
+        let from = self.editor.borrow().path.as_deref().map(workspaces::folder_of).unwrap_or("").to_string();
+        if let Some(rel) = links::resolve(name, rels.iter().map(String::as_str), &from) {
             self.open(&rel);
             return;
         }
+        // A new note goes in the linking note's workspace, unless the link
+        // names one (`[[feina/X]]`).
+        let ws_names: Vec<String> = workspaces::list(&self.shared.notes_dir).into_iter().map(|w| w.folder).collect();
+        let path = if from.is_empty() || ws_names.iter().any(|w| w == workspaces::folder_of(name)) {
+            name.to_string()
+        } else {
+            format!("{from}/{name}")
+        };
         let res = {
             let _g = self.shared.fs_lock.lock().unwrap();
-            notes::create(&self.shared.notes_dir, name)
+            notes::create(&self.shared.notes_dir, &path)
         };
         match res {
             Ok(rel) => {
@@ -1001,7 +1141,8 @@ impl App {
     /// new daily note `rel`. They're fetched in the background; the note can
     /// be used meanwhile.
     fn add_calendar(self: &Rc<Self>, rel: String) {
-        let sources = match calendar::load_sources(&self.shared.notes_dir) {
+        let journal = self.shared.notes_dir.join(workspaces::journal(&self.shared.notes_dir));
+        let sources = match calendar::load_sources(&journal) {
             Ok(s) => s,
             Err(e) => {
                 self.show_message(e, 10);
@@ -1033,9 +1174,14 @@ impl App {
 
     /// Open today's note, creating it if needed.
     fn open_today(self: &Rc<Self>) {
+        // Today's note is in the journal: show that workspace.
+        let ws = self.active_workspace();
+        if !ws.is_empty() && ws != workspaces::JOURNAL {
+            self.select_workspace(workspaces::JOURNAL);
+        }
         let (res, created) = {
             let _g = self.shared.fs_lock.lock().unwrap();
-            let created = !self.shared.notes_dir.join(today_name()).exists();
+            let created = !self.shared.notes_dir.join(today_name(&self.shared.notes_dir)).exists();
             (notes::today(&self.shared.notes_dir, chrono::Local::now().date_naive()), created)
         };
         match res {
@@ -1052,7 +1198,7 @@ impl App {
 
     /// At launch: open today's note now if it exists, else after the first sync.
     fn open_today_at_launch(self: &Rc<Self>) {
-        let name = today_name();
+        let name = today_name(&self.shared.notes_dir);
         if self.shared.notes_dir.join(&name).exists() {
             self.open(&name);
         } else {
@@ -1407,6 +1553,7 @@ impl App {
 
     /// Files may have changed on disk: refresh the list and the open note.
     fn reload_after_sync(self: &Rc<Self>) {
+        self.adopt_strays();
         self.refresh_list();
         // Another device may have added links to the open note.
         self.update_backlinks();
@@ -1486,6 +1633,7 @@ pub fn run(
         pending_photo: RefCell::default(),
         pictures: RefCell::default(),
         link_query: Cell::new(None),
+        migration_later: Cell::new(false),
         cursor_request: Cell::new(0),
         pending_share: RefCell::default(),
         save_timer: Timer::default(),
@@ -1497,15 +1645,21 @@ pub fn run(
     ui.on_open_note(|p| with_app(|a| a.open(&p)));
     ui.on_new_note(|name| {
         with_app(|a| {
+            // In the active workspace, unless the name already starts with
+            // one (`feina/Projecte`).
+            let ws = a.active_workspace();
+            let dir = &a.shared.notes_dir;
+            let named = workspaces::list(dir).iter().any(|w| w.folder == workspaces::folder_of(&name));
+            let path = if ws.is_empty() || named { name.to_string() } else { format!("{ws}/{name}") };
             let res = {
                 let _g = a.shared.fs_lock.lock().unwrap();
-                notes::create(&a.shared.notes_dir, &name)
+                notes::create(dir, &path)
             };
             match res {
                 Ok(rel) => {
                     a.refresh_list();
                     a.open(&rel);
-                    if rel == today_name() {
+                    if rel == today_name(&a.shared.notes_dir) {
                         a.add_calendar(rel);
                     }
                 }
@@ -1514,6 +1668,15 @@ pub fn run(
         })
     });
     ui.on_open_today(|| with_app(|a| a.open_today()));
+    ui.on_select_workspace(|f| with_app(|a| a.select_workspace(&f)));
+    ui.on_new_workspace(|n| with_app(|a| a.new_workspace(&n)));
+    ui.on_migrate(|| with_app(|a| a.migrate()));
+    ui.on_migrate_later(|| {
+        with_app(|a| {
+            a.migration_later.set(true);
+            a.refresh_workspaces();
+        })
+    });
     ui.on_open_link(|t| with_app(|a| a.open_link(&t)));
     ui.on_open_files(|| with_app(|a| a.open_files()));
     ui.on_close_files(|| with_app(|a| a.close_files()));
@@ -1654,6 +1817,7 @@ pub fn run(
         })
     });
 
+    app.adopt_strays();
     app.refresh_list();
     match LAUNCH.lock().unwrap().take() {
         Some(Launch::Share { text, files }) => app.receive_share(text, files),

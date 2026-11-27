@@ -61,11 +61,18 @@ pub fn points_to(name: &str, rel: &str) -> bool {
     }
 }
 
-/// The note `[[name]]` points to, among `rels` (shallowest path first when
-/// several notes share the name).
-pub fn resolve<'a>(name: &str, rels: impl IntoIterator<Item = &'a str>) -> Option<String> {
-    let mut hits: Vec<&str> = rels.into_iter().filter(|r| points_to(name, r)).collect();
-    hits.sort_by_key(|r| (r.matches('/').count(), r.to_string()));
+/// The note `[[name]]`, written in workspace `from` (a folder, or `""`),
+/// points to among `rels`. A path can also be relative to that workspace.
+/// When several notes share the name, ones in the same workspace come
+/// first, then the shallowest.
+pub fn resolve<'a>(name: &str, rels: impl IntoIterator<Item = &'a str>, from: &str) -> Option<String> {
+    let in_ws = (!from.is_empty() && name.contains('/')).then(|| format!("{from}/{name}"));
+    let mut hits: Vec<&str> = rels
+        .into_iter()
+        .filter(|r| points_to(name, r) || in_ws.as_deref().is_some_and(|n| points_to(n, r)))
+        .collect();
+    let same = |r: &str| !from.is_empty() && r.starts_with(&format!("{from}/"));
+    hits.sort_by_key(|r| (!same(r), r.matches('/').count(), r.to_string()));
     hits.first().map(|r| r.to_string())
 }
 
@@ -144,29 +151,32 @@ pub fn pending_query(text: &str, cursor: usize) -> Option<(usize, String)> {
     Some((open + 2, typed.to_string()))
 }
 
-/// Names to offer for a link being typed: notes whose name contains
-/// `query` (ignoring case), names starting with it first, else in the order
-/// given (most recently changed first). An empty query gives recent notes.
-pub fn suggestions(rels: &[String], query: &str, limit: usize) -> Vec<String> {
+/// Names to offer for a link being typed in workspace `ws` (a folder, or
+/// `""`): notes whose name contains `query` (ignoring case). Notes in `ws`
+/// come first, named without the folder; others with it. Then names
+/// starting with the query, then the order given (most recently changed
+/// first). An empty query gives recent notes.
+pub fn suggestions(rels: &[String], query: &str, limit: usize, ws: &str) -> Vec<String> {
     let q = query.trim().to_lowercase();
-    let names = rels.iter().filter(|r| {
-        !crate::calendar::is_config(r) && !r.contains(".conflict-")
-    });
-    let mut starts = Vec::new();
-    let mut contains = Vec::new();
-    for r in names {
-        let name = without_md(r).to_string();
+    let prefix = format!("{ws}/");
+    // (in another workspace, doesn't start with the query, order) -> name
+    let mut found: Vec<((bool, bool, usize), String)> = Vec::new();
+    for (i, r) in rels.iter().enumerate() {
+        if crate::calendar::is_config(r) || r.contains(".conflict-") {
+            continue;
+        }
+        let own = ws.is_empty() || r.starts_with(&prefix);
+        let full = without_md(r);
+        let name = if ws.is_empty() { full } else { full.strip_prefix(&prefix).unwrap_or(full) };
         let lower = name.to_lowercase();
         let file = stem(r).to_lowercase();
-        if q.is_empty() || file.starts_with(&q) || lower.starts_with(&q) {
-            starts.push(name);
-        } else if lower.contains(&q) {
-            contains.push(name);
+        let starts = q.is_empty() || file.starts_with(&q) || lower.starts_with(&q);
+        if starts || lower.contains(&q) {
+            found.push(((!own, !starts, i), name.to_string()));
         }
     }
-    starts.extend(contains);
-    starts.truncate(limit);
-    starts
+    found.sort_by_key(|(k, _)| *k);
+    found.into_iter().take(limit).map(|(_, n)| n).collect()
 }
 
 /// Finish the link being typed (name from `start` to `cursor`) with `name`
@@ -236,8 +246,12 @@ mod tests {
 
         let rels: Vec<String> =
             ["2026_11_27.md", "Montjoia.md", "projectes/Mon diari.md", "CONFIG.md", "Simone.md"].map(String::from).into();
-        assert_eq!(suggestions(&rels, "mon", 5), vec!["Montjoia", "projectes/Mon diari", "Simone"]);
-        assert_eq!(suggestions(&rels, "", 2), vec!["2026_11_27", "Montjoia"]);
+        assert_eq!(suggestions(&rels, "mon", 5, ""), vec!["Montjoia", "projectes/Mon diari", "Simone"]);
+        assert_eq!(suggestions(&rels, "", 2, ""), vec!["2026_11_27", "Montjoia"]);
+        let rels: Vec<String> =
+            ["diari/2026_11_20.md", "feina/Projecte X.md", "diari/Projectes.md", "feina/CONFIG.md"].map(String::from).into();
+        assert_eq!(suggestions(&rels, "proj", 5, "feina"), vec!["Projecte X", "diari/Projectes"]);
+        assert_eq!(suggestions(&rels, "2026", 5, "feina"), vec!["diari/2026_11_20"]);
     }
 
     #[test]
@@ -249,10 +263,15 @@ mod tests {
     #[test]
     fn resolves_by_path_then_name() {
         let rels = ["Montjoia.md", "projectes/diari.md", "arxiu/Montjoia.md"];
-        assert_eq!(resolve("montjoia", rels).as_deref(), Some("Montjoia.md"));
-        assert_eq!(resolve("diari", rels).as_deref(), Some("projectes/diari.md"));
-        assert_eq!(resolve("arxiu/Montjoia", rels).as_deref(), Some("arxiu/Montjoia.md"));
-        assert_eq!(resolve("Ningú", rels), None);
+        assert_eq!(resolve("montjoia", rels, "").as_deref(), Some("Montjoia.md"));
+        assert_eq!(resolve("diari", rels, "").as_deref(), Some("projectes/diari.md"));
+        assert_eq!(resolve("arxiu/Montjoia", rels, "").as_deref(), Some("arxiu/Montjoia.md"));
+        assert_eq!(resolve("Ningú", rels, ""), None);
+        // From a workspace: its own notes first, and paths relative to it.
+        let rels = ["diari/Casa.md", "feina/Casa.md", "feina/clients/Acme.md"];
+        assert_eq!(resolve("Casa", rels, "feina").as_deref(), Some("feina/Casa.md"));
+        assert_eq!(resolve("Casa", rels, "diari").as_deref(), Some("diari/Casa.md"));
+        assert_eq!(resolve("clients/Acme", rels, "feina").as_deref(), Some("feina/clients/Acme.md"));
     }
 
     #[test]

@@ -14,7 +14,8 @@ Keep a read-only copy at `$DIARI_PATH` (default `~/diari`). Before reading, run:
 
 If `$DIARI_REPO` is unset, ask the user for it. If git fails with a permission error, tell them this machine's SSH key needs read access to the repo.
 
-- Daily notes are `YYYY_MM_DD.md` (e.g. `2026_11_27.md`). No file means nothing was written that day.
+- Daily notes are `diari/YYYY_MM_DD.md` (e.g. `diari/2026_11_27.md`; older repos keep them at the top). No file means nothing was written that day.
+- Other top-level folders with their own `CONFIG.md` are workspaces of notes on a subject (`feina/`, `familia/`…).
 - `- HH:MM text` lines are things jotted, shared or dictated at that time.
 - `## Calendar` lists that day's events; `## To do` lists calendar tasks. `- [ ]` is pending, `- [x]` done.
 - Attachments are in `<note>.md.files/`.
