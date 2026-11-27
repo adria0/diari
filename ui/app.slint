@@ -1,4 +1,4 @@
-import { Button, LineEdit, TextEdit, ListView, ScrollView, Palette, Switch } from "std-widgets.slint";
+import { Button, CheckBox, ComboBox, LineEdit, TextEdit, ListView, ScrollView, Palette, Switch } from "std-widgets.slint";
 
 export struct NoteItem {
     path: string,
@@ -42,6 +42,9 @@ export struct MdBlock {
     indent: int,
     image: image,
     target: string,
+    // Task items (kind 13): ticked, and where their box is in the text.
+    checked: bool,
+    pos: int,
 }
 
 // state: 0 ok, 1 syncing, 2 error, 3 conflicts, 4 local only
@@ -80,6 +83,28 @@ component StatusChip inherits Rectangle {
     }
 }
 
+// The voice note button: a red button with a white microphone.
+component RecordButton inherits Rectangle {
+    callback clicked();
+    width: 44px;
+    min-height: 32px;
+    border-radius: 6px;
+    background: ta.pressed ? #b03030 : ta.has-hover ? #e05050 : #d64545;
+    accessible-role: button;
+    accessible-label: "Voice note";
+    accessible-action-default => { root.clicked(); }
+    Image {
+        source: @image-url("../icons/mic-64.png");
+        colorize: white;
+        width: 18px;
+        height: 18px;
+    }
+    ta := TouchArea {
+        mouse-cursor: pointer;
+        clicked => { root.clicked(); }
+    }
+}
+
 component ListPane inherits Rectangle {
     in property <[NoteItem]> notes;
     in property <string> current;
@@ -95,6 +120,7 @@ component ListPane inherits Rectangle {
     callback open(string);
     callback create(string);
     callback today();
+    callback voice();
     callback sync-now();
     callback settings();
     callback filter-edited(string);
@@ -144,6 +170,9 @@ component ListPane inherits Rectangle {
                 text: "Today";
                 primary: true;
                 clicked => { root.today(); }
+            }
+            RecordButton {
+                clicked => { root.voice(); }
             }
             Button {
                 icon: @image-url("../icons/gear-64.png");
@@ -229,6 +258,7 @@ component ListPane inherits Rectangle {
 component PreviewView inherits Rectangle {
     in property <[MdBlock]> blocks;
     callback open-link(string);
+    callback toggle-task(int);
     ListView {
         for b in root.blocks: HorizontalLayout {
             padding-left: 12px + b.indent * 20px;
@@ -278,6 +308,25 @@ component PreviewView inherits Rectangle {
                 link-ta := TouchArea {
                     mouse-cursor: pointer;
                     clicked => { root.open-link(b.target); }
+                }
+            }
+            if b.kind == 13: HorizontalLayout {
+                spacing: 4px;
+                VerticalLayout {
+                    alignment: start;
+                    CheckBox {
+                        checked: b.checked;
+                        accessible-label: b.text;
+                        toggled => { root.toggle-task(b.pos); }
+                    }
+                }
+                Text {
+                    text: b.text;
+                    wrap: word-wrap;
+                    vertical-alignment: center;
+                    color: b.checked ? Palette.foreground.with-alpha(0.5) : Palette.foreground;
+                    font-size: 15px;
+                    horizontal-stretch: 1;
                 }
             }
             if b.kind != 10 && b.kind < 11: Rectangle {
@@ -580,6 +629,83 @@ component HistoryPane inherits VerticalLayout {
     }
 }
 
+// The note's text editor. Like the standard TextEdit (whose background
+// can't be changed), but on paper-coloured background in the light theme.
+component NoteEditor inherits Rectangle {
+    in-out property <string> text <=> input.text;
+    callback edited(string);
+    forward-focus: input;
+
+    background: Palette.color-scheme == ColorScheme.dark ? #ffffff0f : #FCF6E5;
+    border-radius: 4px;
+    border-width: 1px;
+    border-color: input.has-focus ? Palette.accent-background : Palette.border;
+    accessible-role: text-input;
+    accessible-value: root.text;
+
+    ContextMenuArea {
+        Menu {
+            MenuItem {
+                title: "Undo";
+                activated => { input.undo(); }
+            }
+            MenuItem {
+                title: "Redo";
+                activated => { input.redo(); }
+            }
+            MenuSeparator { }
+            MenuItem {
+                title: "Cut";
+                enabled: input.has-selection;
+                activated => { input.cut(); }
+            }
+            MenuItem {
+                title: "Copy";
+                enabled: input.has-selection;
+                activated => { input.copy(); }
+            }
+            MenuItem {
+                title: "Paste";
+                activated => { input.paste(); }
+            }
+            MenuItem {
+                title: "Select All";
+                activated => { input.select-all(); }
+            }
+        }
+
+        scroll := ScrollView {
+            x: 12px;
+            y: 12px;
+            width: parent.width - 24px;
+            height: parent.height - 24px;
+            content-width: self.visible-width;
+            content-height: max(self.visible-height, input.preferred-height);
+
+            input := TextInput {
+                single-line: false;
+                wrap: word-wrap;
+                font-family: EditorFont.family;
+                font-size: EditorFont.size;
+                color: Palette.foreground;
+                selection-background-color: Palette.selection-background;
+                selection-foreground-color: Palette.selection-foreground;
+                page-height: scroll.visible-height;
+                accessible-role: none;
+                edited => { root.edited(self.text); }
+                // Keep the cursor in view (as the standard TextEdit does).
+                cursor-position-changed(cpos) => {
+                    if (cpos.y + scroll.content-y < 0px) {
+                        scroll.content-y = min(0px, max(scroll.visible-height - self.height, -cpos.y));
+                    } else if (cpos.y + scroll.content-y > scroll.visible-height - EditorFont.size * 1.6) {
+                        scroll.content-y = min(0px, max(scroll.visible-height - self.height, scroll.visible-height - cpos.y - EditorFont.size * 1.6));
+                    }
+                }
+            }
+        }
+    }
+}
+
 component EditorPane inherits Rectangle {
     in property <string> path;
     in property <bool> dirty;
@@ -600,6 +726,7 @@ component EditorPane inherits Rectangle {
     in property <string> check-text;
     callback check-config();
     callback close-check();
+    callback voice();
     // A pane (history, files, check) is shown instead of the note.
     property <bool> pane-open: root.show-history || root.show-files || root.show-check;
     in property <[VersionItem]> versions;
@@ -610,6 +737,7 @@ component EditorPane inherits Rectangle {
     callback edited(string);
     callback toggle-preview();
     callback open-link(string);
+    callback toggle-task(int);
     callback open-history();
     callback select-version(string);
     callback restore-version();
@@ -735,18 +863,16 @@ component EditorPane inherits Rectangle {
             restore => { root.restore-version(); }
             close => { root.close-history(); }
         }
-        if !root.pane-open && !root.preview: TextEdit {
+        if !root.pane-open && !root.preview: NoteEditor {
             vertical-stretch: 1;
             text <=> root.text;
-            wrap: word-wrap;
-            font-family: EditorFont.family;
-            font-size: EditorFont.size;
             edited(t) => { root.edited(t); }
         }
         if !root.pane-open && root.preview: PreviewView {
             vertical-stretch: 1;
             blocks: root.blocks;
             open-link(t) => { root.open-link(t); }
+            toggle-task(p) => { root.toggle-task(p); }
         }
     }
 
@@ -766,6 +892,13 @@ component EditorPane inherits Rectangle {
                     text: "Rename";
                     enabled: !root.show-history;
                     clicked => { root.renaming = true; }
+                }
+                Button {
+                    text: "Voice note";
+                    icon: @image-url("../icons/mic-64.png");
+                    colorize-icon: true;
+                    icon-size: 16px;
+                    clicked => { root.voice(); }
                 }
                 Button {
                     text: "History";
@@ -823,6 +956,9 @@ component SettingsPane inherits Rectangle {
     in-out property <string> notes-dir;
     in-out property <string> editor-font;
     in-out property <string> editor-font-size;
+    in-out property <string> voice-language;
+    // 0 auto, 1 light, 2 dark
+    in-out property <int> theme;
     in property <string> default-font;
     in-out property <bool> advanced;
     in property <bool> show-notes-dir;
@@ -899,6 +1035,23 @@ component SettingsPane inherits Rectangle {
                     placeholder: "14";
                     value <=> root.editor-font-size;
                 }
+            }
+            VerticalLayout {
+                spacing: 4px;
+                Text {
+                    text: "Theme";
+                    font-size: 12px;
+                    color: Palette.foreground.with-alpha(0.7);
+                }
+                ComboBox {
+                    model: ["Auto (follow the system)", "Light", "Dark"];
+                    current-index <=> root.theme;
+                }
+            }
+            Field {
+                label: "Voice note language (ca, es, en… or auto)";
+                placeholder: "ca";
+                value <=> root.voice-language;
             }
             Switch {
                 text: "Advanced mode";
@@ -988,6 +1141,15 @@ export component AppWindow inherits Window {
     in property <string> check-text;
     callback check-config();
     callback close-check();
+    // Voice notes: 0 idle, 1 asking to download the model, 2 recording,
+    // 3 working (downloading or transcribing).
+    in property <int> voice-state;
+    in property <string> voice-text;
+    // into-note: add the text to the open note (else to today's).
+    callback voice-record(bool);
+    callback voice-stop();
+    callback voice-cancel();
+    callback voice-download();
     in-out property <string> quick-text;
     in-out property <bool> quick-visible;
     callback quick-add(string);
@@ -1005,6 +1167,13 @@ export component AppWindow inherits Window {
     in-out property <string> cfg-notes-dir;
     in-out property <string> cfg-editor-font;
     in-out property <string> cfg-editor-font-size;
+    in-out property <string> cfg-voice-language;
+    in-out property <int> cfg-theme;
+    // The theme in use (0 auto, 1 light, 2 dark), applied to all widgets.
+    in property <int> theme;
+    changed theme => {
+        Palette.color-scheme = root.theme == 1 ? ColorScheme.light : root.theme == 2 ? ColorScheme.dark : ColorScheme.unknown;
+    }
     in property <string> default-font;
     in-out property <bool> cfg-advanced;
     in property <bool> advanced;
@@ -1019,6 +1188,7 @@ export component AppWindow inherits Window {
     callback text-edited(string);
     callback preview-toggled();
     callback open-link(string);
+    callback toggle-task(int);
     callback open-history();
     callback select-version(string);
     callback restore-version();
@@ -1055,6 +1225,8 @@ export component AppWindow inherits Window {
             notes-dir <=> root.cfg-notes-dir;
             editor-font <=> root.cfg-editor-font;
             editor-font-size <=> root.cfg-editor-font-size;
+            voice-language <=> root.cfg-voice-language;
+            theme <=> root.cfg-theme;
             default-font: root.default-font;
             advanced <=> root.cfg-advanced;
             show-notes-dir: root.desktop;
@@ -1081,6 +1253,7 @@ export component AppWindow inherits Window {
                 open(p) => { root.open-note(p); }
                 create(n) => { root.new-note(n); }
                 today => { root.open-today(); }
+                voice => { root.voice-record(false); }
                 sync-now => { root.sync-now(); }
                 settings => { root.open-settings(); }
                 filter-edited(t) => { root.filter-edited(t); }
@@ -1100,6 +1273,7 @@ export component AppWindow inherits Window {
                 edited(t) => { root.text-edited(t); }
                 toggle-preview => { root.preview-toggled(); }
                 open-link(t) => { root.open-link(t); }
+                toggle-task(p) => { root.toggle-task(p); }
                 show-history: root.show-history;
                 versions: root.versions;
                 history-selected: root.history-selected;
@@ -1117,6 +1291,7 @@ export component AppWindow inherits Window {
                 check-text: root.check-text;
                 check-config => { root.check-config(); }
                 close-check => { root.close-check(); }
+                voice => { root.voice-record(true); }
                 history-side-by-side: root.content-width >= 1000px;
                 open-history => { root.open-history(); }
                 select-version(id) => { root.select-version(id); }
@@ -1136,6 +1311,46 @@ export component AppWindow inherits Window {
             }
         }
 
+        if root.voice-state != 0: Rectangle {
+            background: Palette.alternate-background;
+            border-color: Palette.border;
+            border-width: 1px;
+            HorizontalLayout {
+                padding: 10px;
+                spacing: 8px;
+                if root.voice-state == 2: VerticalLayout {
+                    alignment: center;
+                    Rectangle {
+                        width: 12px;
+                        height: 12px;
+                        border-radius: 6px;
+                        background: #d64545;
+                    }
+                }
+                Text {
+                    text: root.voice-text;
+                    wrap: word-wrap;
+                    vertical-alignment: center;
+                    horizontal-stretch: 1;
+                    color: Palette.foreground;
+                    font-size: 14px;
+                }
+                if root.voice-state == 1: Button {
+                    text: "Download";
+                    primary: true;
+                    clicked => { root.voice-download(); }
+                }
+                if root.voice-state == 2: Button {
+                    text: "Stop";
+                    primary: true;
+                    clicked => { root.voice-stop(); }
+                }
+                if root.voice-state == 1 || root.voice-state == 2: Button {
+                    text: "Cancel";
+                    clicked => { root.voice-cancel(); }
+                }
+            }
+        }
         if root.message != "": Rectangle {
             background: #d6454530;
             HorizontalLayout {

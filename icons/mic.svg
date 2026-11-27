@@ -1,0 +1,5 @@
+<!-- Voice note icon: a microphone, white on transparent (colorized in the UI). -->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" width="24" height="24">
+  <rect x="9" y="2.5" width="6" height="11" rx="3" fill="#fff"/>
+  <path fill="none" stroke="#fff" stroke-width="2" stroke-linecap="round" d="M5.5,11 A6.5,6.5 0 0 0 18.5,11 M12,17.5 V21 M8.5,21 H15.5"/>
+</svg>

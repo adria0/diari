@@ -1,0 +1,4 @@
+[env]
+# whisper-rs-sys: use its bundled bindings instead of running bindgen (which
+# needs libclang, and the right sysroot when building for Android).
+WHISPER_DONT_GENERATE_BINDINGS = "1"

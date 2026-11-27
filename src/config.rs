@@ -27,6 +27,11 @@ pub struct Config {
     /// CONFIG.md in the note list. Was `show_delete`.
     #[serde(alias = "show_delete")]
     pub advanced: bool,
+    /// Language of voice notes, as a Whisper code (`ca`, `es`, `en`…) or
+    /// `auto` to detect it.
+    pub voice_language: String,
+    /// Colors: `auto` (follow the system), `light` or `dark`.
+    pub theme: String,
 }
 
 impl Default for Config {
@@ -42,6 +47,8 @@ impl Default for Config {
             editor_font: String::new(),
             editor_font_size: DEFAULT_FONT_SIZE,
             advanced: false,
+            voice_language: "ca".into(),
+            theme: "auto".into(),
         }
     }
 }

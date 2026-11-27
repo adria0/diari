@@ -28,6 +28,10 @@ fn main() {
             std::fs::copy(format!("{src}/{lib}"), format!("{out}/{lib}"))
                 .unwrap_or_else(|e| panic!("copy {src}/{lib}: {e}"));
         }
+        // whisper-rs-sys asks for the shared libc++. A linker script by that
+        // name, found here before the NDK's, points it at the static one too.
+        std::fs::write(format!("{out}/libc++_shared.so"), "INPUT(-lc++_static -lc++abi)\n")
+            .expect("write libc++_shared.so linker script");
         println!("cargo:rustc-link-search=native={out}");
         println!("cargo:rustc-link-lib=static=c++_static");
         println!("cargo:rustc-link-lib=static=c++abi");

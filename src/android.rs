@@ -466,6 +466,132 @@ pub fn finish(app: &AndroidApp) {
     with_activity(app, |env, activity| env.call_method(activity, "finish", "()V", &[]).map(|_| ()));
 }
 
+const RECORD_AUDIO: &str = "android.permission.RECORD_AUDIO";
+
+/// Ok if diari may use the microphone. If not, ask for it (Android shows
+/// its dialog) and return an error telling the user to try again.
+pub fn ensure_mic_permission() -> Result<(), String> {
+    let app = current_app()?;
+    let granted = with_activity(&app, |env, activity| {
+        let perm = env.new_string(RECORD_AUDIO)?;
+        let r = env
+            .call_method(activity, "checkSelfPermission", "(Ljava/lang/String;)I", &[JValue::Object(&perm)])?
+            .i()?;
+        Ok(r == 0) // PERMISSION_GRANTED
+    })
+    .ok_or("could not check the microphone permission")?;
+    if granted {
+        return Ok(());
+    }
+    with_activity(&app, |env, activity| {
+        let perm = env.new_string(RECORD_AUDIO)?;
+        let arr = env.new_object_array(1, "java/lang/String", &perm)?;
+        env.call_method(activity, "requestPermissions", "([Ljava/lang/String;I)V", &[JValue::Object(&arr), JValue::Int(1)])?;
+        Ok(())
+    });
+    Err("Allow diari to use the microphone, then tap the microphone again.".into())
+}
+
+/// Record 16-bit mono PCM at `rate` from the microphone until `stop` is
+/// set. `started` is called once the microphone is running (or failed).
+/// Blocks: run it on its own thread.
+pub fn record_audio(
+    rate: u32,
+    stop: &AtomicBool,
+    started: impl FnOnce(Result<(), String>),
+) -> Result<Vec<i16>, String> {
+    const VOICE_RECOGNITION: i32 = 6; // MediaRecorder.AudioSource, tuned for speech
+    const CHANNEL_IN_MONO: i32 = 16;
+    const ENCODING_PCM_16BIT: i32 = 2;
+    const STATE_INITIALIZED: i32 = 1;
+
+    let app = current_app()?;
+    let vm = unsafe { JavaVM::from_raw(app.vm_as_ptr() as *mut jni::sys::JavaVM) }.map_err(|e| e.to_string())?;
+    let mut env = vm.attach_current_thread().map_err(|e| e.to_string())?;
+    let mut started = Some(started);
+    let mut fail = |env: &mut JNIEnv, e: String| {
+        if env.exception_check().unwrap_or(false) {
+            let _ = env.exception_describe();
+            let _ = env.exception_clear();
+        }
+        if let Some(f) = started.take() {
+            f(Err(e.clone()));
+        }
+        e
+    };
+    let rate_i = rate as i32;
+    let min = env
+        .call_static_method("android/media/AudioRecord", "getMinBufferSize", "(III)I", &[
+            JValue::Int(rate_i),
+            JValue::Int(CHANNEL_IN_MONO),
+            JValue::Int(ENCODING_PCM_16BIT),
+        ])
+        .and_then(|v| v.i())
+        .map_err(|e| e.to_string());
+    let min = match min {
+        Ok(m) if m > 0 => m,
+        Ok(m) => return Err(fail(&mut env, format!("microphone not available ({m})"))),
+        Err(e) => return Err(fail(&mut env, e)),
+    };
+    let buf_bytes = min.max(rate_i); // at least half a second
+    let rec = match env.new_object("android/media/AudioRecord", "(IIIII)V", &[
+        JValue::Int(VOICE_RECOGNITION),
+        JValue::Int(rate_i),
+        JValue::Int(CHANNEL_IN_MONO),
+        JValue::Int(ENCODING_PCM_16BIT),
+        JValue::Int(buf_bytes),
+    ]) {
+        Ok(r) => r,
+        Err(e) => return Err(fail(&mut env, format!("microphone: {e}"))),
+    };
+    let state = env.call_method(&rec, "getState", "()I", &[]).and_then(|v| v.i()).unwrap_or(0);
+    if state != STATE_INITIALIZED {
+        let _ = env.call_method(&rec, "release", "()V", &[]);
+        return Err(fail(&mut env, "the microphone is busy or not allowed".into()));
+    }
+    if let Err(e) = env.call_method(&rec, "startRecording", "()V", &[]) {
+        let _ = env.call_method(&rec, "release", "()V", &[]);
+        return Err(fail(&mut env, format!("microphone: {e}")));
+    }
+    if let Some(f) = started.take() {
+        f(Ok(()));
+    }
+
+    let chunk = (rate_i / 10).max(256); // 100 ms
+    let arr = env.new_short_array(chunk).map_err(|e| e.to_string())?;
+    let mut pcm: Vec<i16> = Vec::with_capacity(rate as usize * 60);
+    let mut tmp = vec![0i16; chunk as usize];
+    let max = rate as usize * crate::voice::MAX_SECS as usize;
+    let mut result = Ok(());
+    while !stop.load(Ordering::SeqCst) && pcm.len() < max {
+        let n = match env
+            .call_method(&rec, "read", "([SII)I", &[JValue::Object(&arr), JValue::Int(0), JValue::Int(chunk)])
+            .and_then(|v| v.i())
+        {
+            Ok(n) => n,
+            Err(e) => {
+                result = Err(format!("microphone: {e}"));
+                break;
+            }
+        };
+        if n < 0 {
+            result = Err(format!("microphone read error {n}"));
+            break;
+        }
+        if n > 0 {
+            env.get_short_array_region(&arr, 0, &mut tmp[..n as usize]).map_err(|e| e.to_string())?;
+            pcm.extend_from_slice(&tmp[..n as usize]);
+        }
+    }
+    let _ = env.call_method(&rec, "stop", "()V", &[]);
+    let _ = env.call_method(&rec, "release", "()V", &[]);
+    if env.exception_check().unwrap_or(false) {
+        let _ = env.exception_describe();
+        let _ = env.exception_clear();
+    }
+    result.map(|()| pcm)
+}
+
 #[cfg(test)]
 mod tests {
     use super::combine_share;

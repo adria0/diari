@@ -11,9 +11,13 @@ Native markdown notes with automatic git sync, for macOS and Android. It's writt
   - every 5 min
 - **Conflicts never lose data.** If two devices edit the same note, the remote version keeps the name and the local version is saved as `name.conflict-<device>-<timestamp>.md`.
 - **Files and images (Android).** Share files or images to diari from any app, one or several at once. They're saved in today's note's attachment folder (`2026_11_26.md.files/`), and each one adds a line like `- 09:01 [photo.jpg](2026_11_26.md.files/photo.jpg)`.
-  - In the preview, linked images are shown, and other links open when you tap them: web links in the browser, files in the app for their type. On Android, a file is first copied to `Download/diari/` so other apps can read it (Android 10 or later).
+  - In the preview, pictures are shown (local ones, and `![](https://…)` ones from the web, downloaded once into a cache), upright and scaled down; task items (`- [ ]`) are checkboxes you can tick, and other links open when you tap them: web links in the browser, files in the app for their type. On Android, a file is first copied to `Download/diari/` so other apps can read it (Android 10 or later).
   - Attachment folders aren't shown in the note list, are synced with git, move when their note is renamed, and are deleted with it.
   - The Files entry in a note's ⋮ menu lists its files (with thumbnails for images) to open or delete them. Deleting a file also removes the note's line that linked to it.
+- **Voice notes.** The 🎙 button (next to Today, or *Voice note* in a note's ⋮ menu) records you, transcribes it on the device with [Whisper](https://github.com/ggml-org/whisper.cpp), and adds the text as `- HH:MM text` to today's note (or the open one). The audio isn't kept.
+  - The speech model (Whisper small, 190 MB) is downloaded once, the first time you use it.
+  - The language is set in Settings (`ca` by default; `auto` detects it).
+  - Recordings stop on their own after 10 minutes.
 - **Calendars.** When today's note is created, diari adds the day's events from the iCal feeds (Proton Calendar share links, for example) listed in `CONFIG.md` at the top of the notes folder, under a `# cal` heading:
 
   ````markdown
@@ -58,6 +62,7 @@ cargo test
 
 # Android (one-time setup)
 rustup target add aarch64-linux-android x86_64-linux-android
+brew install cmake        # whisper.cpp, for voice notes
 sdkmanager "ndk;30.0.16248370" "build-tools;35.0.0"
 cargo install cargo-apk
 

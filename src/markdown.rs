@@ -9,6 +9,8 @@ pub enum Kind {
     Code,
     Quote,
     ListItem,
+    /// A task list item (`- [ ] …` / `- [x] …`).
+    Task { done: bool },
     Rule,
     /// A link (`[label](target)` or `![alt](target)`), shown below the text
     /// it appears in: the app shows local images and opens everything else.
@@ -24,6 +26,7 @@ impl Kind {
             Kind::Code => 7,
             Kind::Quote => 8,
             Kind::ListItem => 9,
+            Kind::Task { .. } => 13,
             Kind::Rule => 10,
             Kind::Link => 12,
         }
@@ -37,6 +40,10 @@ pub struct Block {
     pub indent: i32,
     /// Link target, for `Kind::Link`.
     pub target: String,
+    /// `Kind::Link` written as an image (`![alt](target)`).
+    pub image: bool,
+    /// `Kind::Task`: byte offset in the source of its `[ ]` / `[x]`.
+    pub pos: usize,
 }
 
 struct State {
@@ -45,10 +52,12 @@ struct State {
     cur: Option<(Kind, i32)>,
     lists: Vec<Option<u64>>,
     quote: i32,
-    /// Links in the current block: (target, label), emitted after it.
-    links: Vec<(String, String)>,
-    /// Open link: its target and where its label starts in `buf`.
-    open_link: Option<(String, usize)>,
+    /// Links in the current block: (target, label, is image), emitted after it.
+    links: Vec<(String, String, bool)>,
+    /// Open link: its target, where its label starts in `buf`, is an image.
+    open_link: Option<(String, usize, bool)>,
+    /// Offset of the current block's task marker.
+    task_pos: usize,
 }
 
 impl State {
@@ -59,26 +68,31 @@ impl State {
             } else {
                 self.buf.trim().to_string()
             };
-            if !text.is_empty() {
-                self.out.push(Block { kind, text, indent, target: String::new() });
+            if !text.is_empty() || matches!(kind, Kind::Task { .. }) {
+                let pos = if matches!(kind, Kind::Task { .. }) { self.task_pos } else { 0 };
+                self.out.push(Block { kind, text, indent, target: String::new(), image: false, pos });
             }
-            for (target, label) in self.links.drain(..) {
-                self.out.push(Block { kind: Kind::Link, text: label, indent, target });
+            for (target, label, image) in self.links.drain(..) {
+                self.out.push(Block { kind: Kind::Link, text: label, indent, target, image, pos: 0 });
             }
         }
         self.buf.clear();
     }
 
-    fn start_link(&mut self, target: &str) {
+    fn start_link(&mut self, target: &str, image: bool) {
         self.ensure_open();
-        self.open_link = Some((target.to_string(), self.buf.len()));
+        self.open_link = Some((target.to_string(), self.buf.len(), image));
     }
 
     fn end_link(&mut self) {
-        if let Some((target, start)) = self.open_link.take() {
+        if let Some((target, start, image)) = self.open_link.take() {
             let label = self.buf[start..].trim().to_string();
+            // A picture's alt text is its caption, not part of the sentence.
+            if image {
+                self.buf.truncate(start);
+            }
             let label = if label.is_empty() { target.rsplit('/').next().unwrap_or(&target).to_string() } else { label };
-            self.links.push((target, label));
+            self.links.push((target, label, image));
         }
     }
 
@@ -108,9 +122,10 @@ pub fn parse(src: &str) -> Vec<Block> {
         quote: 0,
         links: Vec::new(),
         open_link: None,
+        task_pos: 0,
     };
 
-    for ev in Parser::new_ext(src, opts) {
+    for (ev, range) in Parser::new_ext(src, opts).into_offset_iter() {
         match ev {
             Event::Start(tag) => match tag {
                 Tag::Heading { level, .. } => {
@@ -157,7 +172,8 @@ pub fn parse(src: &str) -> Vec<Block> {
                     s.flush();
                     s.cur = Some((Kind::Code, s.indent()));
                 }
-                Tag::Link { dest_url, .. } | Tag::Image { dest_url, .. } => s.start_link(&dest_url),
+                Tag::Link { dest_url, .. } => s.start_link(&dest_url, false),
+                Tag::Image { dest_url, .. } => s.start_link(&dest_url, true),
                 _ => {}
             },
             Event::End(tag) => match tag {
@@ -196,9 +212,25 @@ pub fn parse(src: &str) -> Vec<Block> {
             Event::HardBreak => s.buf.push('\n'),
             Event::Rule => {
                 s.flush();
-                s.out.push(Block { kind: Kind::Rule, text: String::new(), indent: 0, target: String::new() });
+                s.out.push(Block {
+                    kind: Kind::Rule,
+                    text: String::new(),
+                    indent: 0,
+                    target: String::new(),
+                    image: false,
+                    pos: 0,
+                });
             }
-            Event::TaskListMarker(done) => s.buf.push_str(if done { "[x] " } else { "[ ] " }),
+            // The item becomes a task: drop its bullet, keep where the box is.
+            Event::TaskListMarker(done) => {
+                if let Some((kind @ Kind::ListItem, _)) = s.cur.as_mut() {
+                    *kind = Kind::Task { done };
+                    s.buf.clear();
+                    s.task_pos = range.start;
+                } else {
+                    s.buf.push_str(if done { "[x] " } else { "[ ] " });
+                }
+            }
             Event::FootnoteReference(r) => {
                 s.buf.push('[');
                 s.buf.push_str(&r);
@@ -236,7 +268,7 @@ mod tests {
                 (Kind::Quote, "quoted".into(), 0),
                 (Kind::Code, "fn x() {}".into(), 0),
                 (Kind::Rule, "".into(), 0),
-                (Kind::ListItem, "• [x] done".into(), 0),
+                (Kind::Task { done: true }, "done".into(), 0),
             ]
         );
     }
@@ -270,6 +302,37 @@ mod tests {
                 (Kind::ListItem, "• 10:00 next".into(), 0),
             ]
         );
+    }
+
+    #[test]
+    fn tasks_know_where_their_box_is() {
+        let src = "# T\n\n- [ ] buy bread\n- [x] call\n  - [ ] nested\n- plain\n";
+        let blocks = parse(src);
+        let tasks: Vec<_> = blocks
+            .iter()
+            .filter(|b| matches!(b.kind, Kind::Task { .. }))
+            .map(|b| (b.kind, b.text.as_str(), &src[b.pos..b.pos + 3]))
+            .collect();
+        assert_eq!(
+            tasks,
+            vec![
+                (Kind::Task { done: false }, "buy bread", "[ ]"),
+                (Kind::Task { done: true }, "call", "[x]"),
+                (Kind::Task { done: false }, "nested", "[ ]"),
+            ]
+        );
+        assert_eq!(blocks.last().unwrap().text, "• plain");
+    }
+
+    #[test]
+    fn images_are_marked() {
+        let b = parse("Look: ![cat](https://x.y/cat)\n\n![](b.png)\n\n[doc](a.pdf)\n");
+        // The alt text isn't repeated as text, and a lone picture leaves no
+        // empty paragraph.
+        assert_eq!(b[0].text, "Look:");
+        assert_eq!(b.iter().filter(|b| b.kind == Kind::Para).count(), 2);
+        let links: Vec<_> = b.iter().filter(|b| b.kind == Kind::Link).map(|b| (b.target.as_str(), b.image)).collect();
+        assert_eq!(links, vec![("https://x.y/cat", true), ("b.png", true), ("a.pdf", false)]);
     }
 
     #[test]

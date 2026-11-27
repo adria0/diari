@@ -1,11 +1,13 @@
 pub mod attachments;
 pub mod calendar;
 pub mod config;
+pub mod images;
 #[cfg(target_os = "android")]
 mod android;
 pub mod markdown;
 pub mod notes;
 pub mod sync;
+pub mod voice;
 
 slint::include_modules!();
 
@@ -24,6 +26,23 @@ const AUTOSAVE_DELAY: Duration = Duration::from_secs(1);
 /// makes one commit per pause of a minute instead of one per short pause.
 const SYNC_AFTER_SAVE_DELAY: Duration = Duration::from_secs(60);
 const HISTORY_LIMIT: usize = 200;
+
+/// Where a voice note is in its life.
+enum Voice {
+    Idle,
+    /// The speech model isn't there yet: asking to download it.
+    AskDownload { into: Option<String> },
+    Recording { rec: voice::Recorder, into: Option<String>, at: chrono::NaiveTime },
+    /// Downloading the model or transcribing.
+    Working,
+}
+
+/// A picture for the preview, by where it comes from.
+enum Picture {
+    Loading,
+    Ready(slint::Image),
+    Failed,
+}
 
 /// Per-note editor state that isn't mirrored in the UI.
 #[derive(Default)]
@@ -46,6 +65,10 @@ struct App {
     /// Bumped on each "Check config" and when it closes, so a late report
     /// from an earlier check isn't shown.
     check_gen: Cell<u64>,
+    voice: RefCell<Voice>,
+    voice_timer: Timer,
+    /// Decoded preview pictures. Local files are keyed with their mtime.
+    pictures: RefCell<std::collections::HashMap<(images::Source, Option<std::time::SystemTime>), Picture>>,
     /// What was shared to the app at launch, added once the first sync is done.
     pending_share: RefCell<Option<(String, Vec<SharedFile>)>>,
     save_timer: Timer,
@@ -178,8 +201,18 @@ fn default_mono_font() -> &'static str {
     }
 }
 
-/// Apply display settings from the config: editor font, advanced mode.
+/// Settings value of `theme` <-> the UI's index (0 auto, 1 light, 2 dark).
+fn theme_index(theme: &str) -> i32 {
+    match theme {
+        "light" => 1,
+        "dark" => 2,
+        _ => 0,
+    }
+}
+
+/// Apply display settings from the config: editor font, theme, advanced mode.
 fn apply_font(ui: &AppWindow, cfg: &Config) {
+    ui.set_theme(theme_index(&cfg.theme));
     ui.set_advanced(cfg.advanced);
     let family = if cfg.editor_font.is_empty() { default_mono_font() } else { cfg.editor_font.as_str() };
     let font = ui.global::<EditorFont>();
@@ -335,6 +368,176 @@ impl App {
         }
     }
 
+    fn set_voice(&self, state: i32, text: impl Into<SharedString>) {
+        let ui = self.ui();
+        ui.set_voice_state(state);
+        ui.set_voice_text(text.into());
+    }
+
+    /// Mic button (or "Voice note" in a note's menu, `into_note`): record,
+    /// then add the transcribed text to the open note or today's.
+    fn voice_record(self: &Rc<Self>, into_note: bool) {
+        if !matches!(*self.voice.borrow(), Voice::Idle) {
+            return;
+        }
+        let into = if into_note { self.editor.borrow().path.clone() } else { None };
+        if !voice::model_path(&self.shared.data_dir).exists() {
+            *self.voice.borrow_mut() = Voice::AskDownload { into };
+            self.set_voice(
+                1,
+                format!(
+                    "Voice notes are transcribed on this device, with a {} MB speech model that's downloaded once. Download it now?",
+                    voice::MODEL_SIZE_MB
+                ),
+            );
+            return;
+        }
+        self.start_recording(into);
+    }
+
+    fn start_recording(self: &Rc<Self>, into: Option<String>) {
+        match voice::Recorder::start() {
+            Ok(rec) => {
+                let at = chrono::Local::now().time();
+                *self.voice.borrow_mut() = Voice::Recording { rec, into, at };
+                self.set_voice(2, "Recording 0:00");
+                let weak = Rc::downgrade(self);
+                self.voice_timer.start(TimerMode::Repeated, Duration::from_millis(500), move || {
+                    if let Some(a) = weak.upgrade() {
+                        a.voice_tick();
+                    }
+                });
+            }
+            Err(e) => {
+                *self.voice.borrow_mut() = Voice::Idle;
+                self.set_voice(0, "");
+                self.show_message(e, 8);
+            }
+        }
+    }
+
+    fn voice_tick(self: &Rc<Self>) {
+        let secs = match &*self.voice.borrow() {
+            Voice::Recording { rec, .. } => rec.elapsed().as_secs(),
+            _ => return,
+        };
+        if secs >= voice::MAX_SECS {
+            self.voice_stop();
+        } else {
+            self.ui().set_voice_text(format!("Recording {}:{:02}", secs / 60, secs % 60).into());
+        }
+    }
+
+    /// Stop recording and transcribe in the background.
+    fn voice_stop(self: &Rc<Self>) {
+        self.voice_timer.stop();
+        let prev = {
+            let mut v = self.voice.borrow_mut();
+            if !matches!(*v, Voice::Recording { .. }) {
+                return;
+            }
+            std::mem::replace(&mut *v, Voice::Working)
+        };
+        let Voice::Recording { rec, into, at } = prev else { return };
+        self.set_voice(3, "Transcribing…");
+        let samples = match rec.stop() {
+            Ok(s) => s,
+            Err(e) => {
+                self.voice_done(Err(e), into, at);
+                return;
+            }
+        };
+        let model = voice::model_path(&self.shared.data_dir);
+        let language = self.shared.config.lock().unwrap().voice_language.clone();
+        let weak = self.ui.clone();
+        let spawned = std::thread::Builder::new().name("diari-transcribe".into()).spawn(move || {
+            let started = std::time::Instant::now();
+            let r = voice::transcribe(&model, &samples, &language);
+            log::info!(
+                "transcribed {:.1}s of audio (level {:.4}) in {:.1}s: {} chars",
+                samples.len() as f32 / voice::SAMPLE_RATE as f32,
+                voice::rms(&samples),
+                started.elapsed().as_secs_f32(),
+                r.as_ref().map_or(0, |t| t.chars().count())
+            );
+            let _ = weak.upgrade_in_event_loop(move |_| with_app(|a| a.voice_done(r, into, at)));
+        });
+        if let Err(e) = spawned {
+            *self.voice.borrow_mut() = Voice::Idle;
+            self.set_voice(0, "");
+            self.show_message(format!("Could not transcribe: {e}"), 8);
+        }
+    }
+
+    fn voice_done(self: &Rc<Self>, r: Result<String, String>, into: Option<String>, at: chrono::NaiveTime) {
+        *self.voice.borrow_mut() = Voice::Idle;
+        self.set_voice(0, "");
+        match r {
+            Ok(t) if t.trim().is_empty() => self.show_message("Nothing was heard in the recording.", 5),
+            Ok(t) => {
+                let line = notes::quick_line(at, &t);
+                self.add_to_note(into, |_, _| Ok(vec![line]));
+            }
+            Err(e) => self.show_message(e, 10),
+        }
+    }
+
+    /// Cancel the download question or the recording (the audio is dropped).
+    fn voice_cancel(&self) {
+        self.voice_timer.stop();
+        let prev = {
+            let mut v = self.voice.borrow_mut();
+            if matches!(*v, Voice::Working) {
+                return;
+            }
+            std::mem::replace(&mut *v, Voice::Idle)
+        };
+        if let Voice::Recording { rec, .. } = prev {
+            let _ = rec.stop();
+        }
+        self.set_voice(0, "");
+    }
+
+    /// Download the speech model, then start the recording that asked for it.
+    fn voice_download(self: &Rc<Self>) {
+        let prev = {
+            let mut v = self.voice.borrow_mut();
+            if !matches!(*v, Voice::AskDownload { .. }) {
+                return;
+            }
+            std::mem::replace(&mut *v, Voice::Working)
+        };
+        let Voice::AskDownload { into } = prev else { return };
+        self.set_voice(3, "Downloading the speech model…");
+        let data_dir = self.shared.data_dir.clone();
+        let weak = self.ui.clone();
+        let spawned = std::thread::Builder::new().name("diari-model".into()).spawn(move || {
+            let w = weak.clone();
+            let r = voice::download_model(&data_dir, &move |done, total| {
+                let text = match total {
+                    Some(t) if t > 0 => format!("Downloading the speech model… {}%", done * 100 / t),
+                    _ => format!("Downloading the speech model… {} MB", done / 1_000_000),
+                };
+                let _ = w.upgrade_in_event_loop(move |ui| ui.set_voice_text(text.into()));
+            });
+            let _ = weak.upgrade_in_event_loop(move |_| {
+                with_app(|a| {
+                    *a.voice.borrow_mut() = Voice::Idle;
+                    a.set_voice(0, "");
+                    match r {
+                        Ok(_) => a.start_recording(into),
+                        Err(e) => a.show_message(format!("Could not download the speech model: {e}"), 10),
+                    }
+                })
+            });
+        });
+        if let Err(e) = spawned {
+            *self.voice.borrow_mut() = Voice::Idle;
+            self.set_voice(0, "");
+            self.show_message(format!("Could not download the speech model: {e}"), 8);
+        }
+    }
+
     fn close_check(&self) {
         self.check_gen.set(self.check_gen.get() + 1);
         let ui = self.ui();
@@ -351,13 +554,14 @@ impl App {
         self.ui().set_show_files(true);
     }
 
-    fn fill_files(&self) {
+    fn fill_files(self: &Rc<Self>) {
         let Some(note) = self.editor.borrow().path.clone() else { return };
         let items: Vec<FileItem> = attachments::list(&self.shared.notes_dir, &note)
             .into_iter()
             .map(|a| {
+                // Same loader as the preview: upright, scaled, off the UI thread.
                 let image = if attachments::is_image(&a.name) {
-                    slint::Image::load_from_path(&a.path).ok()
+                    self.picture_of(images::Source::Local(a.path.clone()))
                 } else {
                     None
                 };
@@ -761,7 +965,7 @@ impl App {
         ui.set_history_diff(ModelRc::default());
     }
 
-    fn update_preview(&self) {
+    fn update_preview(self: &Rc<Self>) {
         let ui = self.ui();
         let note = self.editor.borrow().path.clone().unwrap_or_default();
         let blocks: Vec<MdBlock> = markdown::parse(&ui.get_editor_text())
@@ -769,19 +973,106 @@ impl App {
             .map(|b| {
                 let mut kind = b.kind.code();
                 let mut image = slint::Image::default();
-                if b.kind == markdown::Kind::Link && attachments::is_image(&b.target) {
-                    // Show local images inline; anything else stays a link to open.
-                    if let Some(img) = attachments::resolve_link(&self.shared.notes_dir, &note, &b.target)
-                        .and_then(|p| slint::Image::load_from_path(&p).ok())
-                    {
+                if b.kind == markdown::Kind::Link {
+                    // Pictures show inline once loaded; anything else stays a
+                    // link to open.
+                    if let Some(img) = self.picture(&note, &b.target, b.image) {
                         kind = PREVIEW_IMAGE;
                         image = img;
                     }
                 }
-                MdBlock { kind, text: b.text.into(), indent: b.indent, image, target: b.target.into() }
+                let checked = matches!(b.kind, markdown::Kind::Task { done: true });
+                MdBlock {
+                    kind,
+                    text: b.text.into(),
+                    indent: b.indent,
+                    image,
+                    target: b.target.into(),
+                    checked,
+                    pos: b.pos as i32,
+                }
             })
             .collect();
         ui.set_blocks(ModelRc::new(VecModel::from(blocks)));
+    }
+
+    /// The picture a preview link points to, if it's one and it's loaded.
+    /// Starts loading it otherwise; the preview is refreshed when it's ready.
+    fn picture(self: &Rc<Self>, note: &str, target: &str, written_as_image: bool) -> Option<slint::Image> {
+        self.picture_of(self.picture_source(note, target, written_as_image)?)
+    }
+
+    /// Where the picture a link points to comes from, if it's a picture.
+    fn picture_source(&self, note: &str, target: &str, written_as_image: bool) -> Option<images::Source> {
+        let src = if attachments::is_url(target) {
+            let web = target.starts_with("https://") || target.starts_with("http://");
+            if !web || !(written_as_image || attachments::is_image(target)) {
+                return None;
+            }
+            Some(images::Source::Web(target.to_string()))
+        } else {
+            if !(written_as_image || attachments::is_image(target)) {
+                return None;
+            }
+            Some(images::Source::Local(attachments::resolve_link(&self.shared.notes_dir, note, target)?))
+        };
+        src
+    }
+
+    /// A picture, if it's loaded. Starts loading it otherwise; the preview
+    /// and the file list are refreshed when it's ready.
+    fn picture_of(self: &Rc<Self>, src: images::Source) -> Option<slint::Image> {
+        let mtime = match &src {
+            images::Source::Local(p) => Some(std::fs::metadata(p).and_then(|m| m.modified()).ok()?),
+            images::Source::Web(_) => None,
+        };
+        let key = (src.clone(), mtime);
+        if let Some(p) = self.pictures.borrow().get(&key) {
+            return match p {
+                Picture::Ready(img) => Some(img.clone()),
+                Picture::Loading | Picture::Failed => None,
+            };
+        }
+        self.pictures.borrow_mut().insert(key.clone(), Picture::Loading);
+        let cache_dir = self.shared.data_dir.join("cache").join("pictures");
+        let weak = self.ui.clone();
+        let _ = std::thread::Builder::new().name("diari-picture".into()).spawn(move || {
+            let r = images::load(&key.0, &cache_dir);
+            if let Err(e) = &r {
+                log::warn!("picture {:?}: {e}", key.0);
+            }
+            let _ = weak.upgrade_in_event_loop(move |ui| {
+                with_app(|a| {
+                    let p = match r {
+                        Ok(buf) => Picture::Ready(slint::Image::from_rgba8(buf)),
+                        Err(_) => Picture::Failed,
+                    };
+                    a.pictures.borrow_mut().insert(key, p);
+                    if ui.get_preview() {
+                        a.update_preview();
+                    }
+                    if ui.get_show_files() {
+                        a.fill_files();
+                    }
+                })
+            });
+        });
+        None
+    }
+
+    /// A checkbox in the preview was tapped: flip `[ ]` / `[x]` at `pos`.
+    fn toggle_task(self: &Rc<Self>, pos: usize) {
+        let ui = self.ui();
+        let mut text = ui.get_editor_text().to_string();
+        let new = match text.get(pos..pos + 3) {
+            Some("[ ]") => "[x]",
+            Some("[x]" | "[X]") => "[ ]",
+            _ => return,
+        };
+        text.replace_range(pos..pos + 3, new);
+        self.set_text(&text);
+        self.mark_edited();
+        self.update_preview();
     }
 
     fn load_settings_into_ui(&self) {
@@ -796,6 +1087,8 @@ impl App {
         ui.set_cfg_editor_font(cfg.editor_font.clone().into());
         ui.set_cfg_editor_font_size(cfg.editor_font_size.to_string().into());
         ui.set_cfg_advanced(cfg.advanced);
+        ui.set_cfg_voice_language(cfg.voice_language.clone().into());
+        ui.set_cfg_theme(theme_index(&cfg.theme));
         let keys = self.shared.keys.lock().unwrap();
         ui.set_public_key(keys.public_openssh.clone().into());
         ui.set_key_fingerprint(keys.fingerprint.clone().into());
@@ -820,6 +1113,16 @@ impl App {
             .map(|n: u32| n.clamp(*config::FONT_SIZES.start(), *config::FONT_SIZES.end()))
             .unwrap_or(config::DEFAULT_FONT_SIZE);
         cfg.advanced = ui.get_cfg_advanced();
+        cfg.theme = match ui.get_cfg_theme() {
+            1 => "light",
+            2 => "dark",
+            _ => "auto",
+        }
+        .into();
+        cfg.voice_language = match ui.get_cfg_voice_language().trim() {
+            "" => "ca".into(),
+            l => l.to_lowercase(),
+        };
         apply_font(&ui, &cfg);
         let hide_config = !cfg.advanced
             && self.editor.borrow().path.as_deref().is_some_and(calendar::is_config);
@@ -979,6 +1282,9 @@ pub fn run(
         history: RefCell::default(),
         open_today_after_sync: Cell::new(false),
         check_gen: Cell::new(0),
+        voice: RefCell::new(Voice::Idle),
+        voice_timer: Timer::default(),
+        pictures: RefCell::default(),
         pending_share: RefCell::default(),
         save_timer: Timer::default(),
         sync_timer: Timer::default(),
@@ -1010,6 +1316,11 @@ pub fn run(
     ui.on_open_files(|| with_app(|a| a.open_files()));
     ui.on_close_files(|| with_app(|a| a.close_files()));
     ui.on_check_config(|| with_app(|a| a.check_config()));
+    ui.on_toggle_task(|pos| with_app(|a| a.toggle_task(pos.max(0) as usize)));
+    ui.on_voice_record(|into_note| with_app(|a| a.voice_record(into_note)));
+    ui.on_voice_stop(|| with_app(|a| a.voice_stop()));
+    ui.on_voice_cancel(|| with_app(|a| a.voice_cancel()));
+    ui.on_voice_download(|| with_app(|a| a.voice_download()));
     ui.on_close_check(|| with_app(|a| a.close_check()));
     ui.on_open_file(|n| with_app(|a| a.open_attachment(&n)));
     ui.on_delete_file(|n| with_app(|a| a.delete_attachment(&n)));

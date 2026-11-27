@@ -24,6 +24,22 @@ export "AR_aarch64_linux_android=$NDK_BIN/llvm-ar"
 export "AR_x86_64_linux_android=$NDK_BIN/llvm-ar"
 export PATH="$NDK_BIN:$PATH"
 
+# whisper.cpp (voice notes) is built with CMake: target Android with the
+# NDK, and the CPU features of current phones (ARMv8.2 with dot product and
+# fp16) instead of the build machine's.
+case "$TARGET" in
+  aarch64-linux-android) ABI=arm64-v8a; export GGML_CPU_ARM_ARCH="armv8.2-a+dotprod+fp16" ;;
+  x86_64-linux-android) ABI=x86_64 ;;
+esac
+# whisper-rs-sys decides to link ggml-blas from the build machine (macOS)
+# rather than the target; Android has no BLAS, so give it an empty one.
+STUBS="$PWD/target/android-stubs"
+mkdir -p "$STUBS"
+[[ -f "$STUBS/libggml-blas.a" ]] || "$NDK_BIN/llvm-ar" rc "$STUBS/libggml-blas.a"
+export RUSTFLAGS="${RUSTFLAGS:+$RUSTFLAGS }-L $STUBS"
+export CMAKE_SYSTEM_NAME=Android CMAKE_SYSTEM_VERSION=26 CMAKE_ANDROID_ARCH_ABI="$ABI" \
+  CMAKE_ANDROID_NDK="$ANDROID_NDK_ROOT" CMAKE_ANDROID_STL_TYPE=c++_static GGML_NATIVE=OFF
+
 # Slint compiles a Java helper and dexes it with d8. The d8 in build-tools 34
 # crashes on release-mode classes, so use the newest installed build-tools.
 if [[ -z "${ANDROID_BUILD_TOOLS_VERSION:-}" ]]; then

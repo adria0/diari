@@ -34,7 +34,11 @@ fn click_menu(ui: &AppWindow, label: &str) {
     let menu = find(ui, "Menu");
     let (m, ms) = (menu.absolute_position(), menu.size());
     let origin = LogicalPosition::new(m.x + ms.width - 160., m.y + ms.height + 4.);
-    let el = find(ui, label);
+    // The menu is searched last, so if a header button has the same label,
+    // the menu entry is the last match.
+    let el = ElementHandle::find_by_accessible_label(ui, label)
+        .last()
+        .unwrap_or_else(|| panic!("no menu entry {label:?}"));
     let (p, s) = (el.absolute_position(), el.size());
     press_at(ui, LogicalPosition::new(origin.x + p.x + s.width / 2., origin.y + p.y + s.height / 2.));
 }
@@ -61,6 +65,9 @@ fn menu_entries_work() {
     ui.on_delete_note(move || d.set(d.get() + 1));
     let h = histories.clone();
     ui.on_open_history(move || h.set(h.get() + 1));
+    let voices = Rc::new(std::cell::RefCell::new(Vec::new()));
+    let v = voices.clone();
+    ui.on_voice_record(move |into_note| v.borrow_mut().push(into_note));
 
     // The header has only Preview and the menu (plus the note's name).
     assert!(visible(&ui, "Preview") && visible(&ui, "Menu"));
@@ -72,6 +79,13 @@ fn menu_entries_work() {
     click_menu(&ui, "Check config");
     assert_eq!(checks.get(), 1, "Check config did nothing");
     assert!(!visible(&ui, "Check config"), "menu stayed open");
+
+    // Voice note from the menu goes into the open note; from the list,
+    // into today's.
+    click(&ui, "Menu");
+    click_menu(&ui, "Voice note");
+    click(&ui, "Voice note");
+    assert_eq!(*voices.borrow(), vec![true, false]);
 
     // History
     click(&ui, "Menu");
