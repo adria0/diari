@@ -593,9 +593,9 @@ component EditorPane inherits Rectangle {
     VerticalLayout {
         padding: 12px;
         spacing: 8px;
-        HorizontalLayout {
+        header := HorizontalLayout {
             spacing: 8px;
-            if root.show-back: Button {
+            if root.show-back && !root.renaming: Button {
                 text: "‹";
                 clicked => { root.back(); }
             }
@@ -609,14 +609,6 @@ component EditorPane inherits Rectangle {
                 font-size: 15px;
                 font-weight: 600;
                 color: Palette.foreground;
-            }
-            if !root.renaming: Button {
-                icon: @image-url("../icons/pencil-64.png");
-                colorize-icon: true;
-                icon-size: 16px;
-                accessible-label: "Rename";
-                enabled: !root.show-history;
-                clicked => { root.renaming = true; }
             }
             if root.renaming: LineEdit {
                 text: root.path;
@@ -637,7 +629,7 @@ component EditorPane inherits Rectangle {
                 text: "Cancel";
                 clicked => { root.renaming = false; }
             }
-            VerticalLayout {
+            if !root.renaming: VerticalLayout {
                 alignment: center;
                 Text {
                     text: root.dirty ? "●" : " ";
@@ -645,23 +637,18 @@ component EditorPane inherits Rectangle {
                     width: 12px;
                 }
             }
-            Button {
+            if !root.renaming: Button {
                 text: root.preview ? "Edit" : "Preview";
                 enabled: !root.show-history && !root.show-files;
                 clicked => { root.toggle-preview(); }
             }
-            Button {
-                text: "History";
-                enabled: !root.show-history && !root.show-files;
-                clicked => { root.open-history(); }
-            }
-            Button {
-                icon: @image-url("../icons/clip-64.png");
+            // Less-used actions live behind a menu button.
+            if !root.renaming: Button {
+                icon: @image-url("../icons/menu-64.png");
                 colorize-icon: true;
                 icon-size: 18px;
-                accessible-label: "Files";
-                enabled: !root.show-history && !root.show-files;
-                clicked => { root.open-files(); }
+                accessible-label: "Menu";
+                clicked => { menu.show(); }
             }
             if root.show-delete && !root.renaming: Button {
                 text: root.confirm-delete ? "Really?" : "Delete";
@@ -705,6 +692,40 @@ component EditorPane inherits Rectangle {
             vertical-stretch: 1;
             blocks: root.blocks;
             open-link(t) => { root.open-link(t); }
+        }
+    }
+
+    menu := PopupWindow {
+        x: header.x + header.width - self.width;
+        y: header.y + header.height + 4px;
+        width: 160px;
+        Rectangle {
+            background: Palette.alternate-background;
+            border-color: Palette.border;
+            border-width: 1px;
+            border-radius: 6px;
+            VerticalLayout {
+                padding: 6px;
+                spacing: 4px;
+                Button {
+                    text: "Rename";
+                    enabled: !root.show-history;
+                    clicked => { root.renaming = true; }
+                }
+                Button {
+                    text: "History";
+                    enabled: !root.show-history && !root.show-files;
+                    clicked => { root.open-history(); }
+                }
+                Button {
+                    text: "Files";
+                    icon: @image-url("../icons/clip-64.png");
+                    colorize-icon: true;
+                    icon-size: 16px;
+                    enabled: !root.show-history && !root.show-files;
+                    clicked => { root.open-files(); }
+                }
+            }
         }
     }
 }
