@@ -2,6 +2,10 @@
 
 Native markdown notes with automatic git sync, for macOS and Android. It's written in Rust, and the UI is Slint (no webview).
 
+<p>
+  <img src="docs/screenshots/macos.png" alt="diari on macOS" height="420">
+</p>
+
 ## Features
 - Lists every `*.md` file in the notes folder, including subfolders. You can search, create, rename and delete notes. Delete (in a note's ⋮ menu) and `CONFIG.md` only show with **Advanced mode** on (Settings).
 - Plain-text editor that autosaves 1 s after you stop typing, plus a native markdown preview.
