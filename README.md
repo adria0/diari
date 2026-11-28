@@ -4,6 +4,7 @@ Native markdown notes with automatic git sync, for macOS and Android. It's writt
 
 <p>
   <img src="docs/screenshots/macos.png" alt="diari on macOS" height="420">
+  <img src="docs/screenshots/android.png" alt="diari on Android" height="420">
 </p>
 
 ## Features
