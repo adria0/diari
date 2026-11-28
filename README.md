@@ -61,9 +61,12 @@ diari was first called perb. On macOS, the first launch moves `…/Application S
 Host keys are trusted on first use and stored in `known_hosts.toml`. If a host's key later changes, sync stops with an error.
 
 ## Build
+`make` lists the common tasks (they call the commands below).
+
 ```sh
 # macOS
 cargo run --release
+make install              # build diari.app and put it in /Applications
 
 # tests (the git sync tests use local bare repos)
 cargo test
