@@ -83,6 +83,9 @@ struct App {
     migration_later: Cell<bool>,
     /// Bumped to move the editor's cursor (see `cursor-request`).
     cursor_request: Cell<i32>,
+    /// Callouts folded or unfolded by a tap in the preview (away from how
+    /// they're written), by where they start, and the note they're in.
+    callouts_toggled: RefCell<(String, std::collections::HashSet<usize>)>,
     pictures: RefCell<std::collections::HashMap<(images::Source, Option<std::time::SystemTime>), Picture>>,
     /// What was shared to the app at launch, added once the first sync is done.
     pending_share: RefCell<Option<(String, Vec<SharedFile>)>>,
@@ -1297,8 +1300,18 @@ impl App {
     fn update_preview(self: &Rc<Self>) {
         let ui = self.ui();
         let note = self.editor.borrow().path.clone().unwrap_or_default();
+        let toggled = {
+            let mut t = self.callouts_toggled.borrow_mut();
+            if t.0 != note {
+                *t = (note.clone(), Default::default());
+            }
+            t.1.clone()
+        };
+        // A folded callout shows its title only.
+        let folded = |c: &markdown::Callout| c.fold.is_some_and(|f| f != toggled.contains(&c.pos));
         let blocks: Vec<MdBlock> = markdown::parse(&ui.get_editor_text())
             .into_iter()
+            .filter(|b| b.kind == markdown::Kind::CalloutTitle || !b.callout.as_ref().is_some_and(folded))
             .map(|b| {
                 let mut kind = b.kind.code();
                 let mut image = slint::Image::default();
@@ -1319,10 +1332,18 @@ impl App {
                     target: b.target.into(),
                     checked,
                     pos: b.pos as i32,
+                    callout: b.callout.map_or(0, |c| c.color.code()),
+                    foldable: b.callout.is_some_and(|c| c.fold.is_some()),
+                    folded: b.callout.as_ref().is_some_and(folded),
+                    callout_last: false,
                 }
             })
             .collect();
         let mut blocks = blocks;
+        for i in 0..blocks.len() {
+            let next_same = blocks.get(i + 1).is_some_and(|n| n.callout > 0 && n.kind != markdown::Kind::CalloutTitle.code());
+            blocks[i].callout_last = blocks[i].callout > 0 && !next_same;
+        }
         // Notes that link here, each with the line that does.
         let back = if note.is_empty() { Vec::new() } else { links::backlinks(&self.shared.notes_dir, &note) };
         if !back.is_empty() {
@@ -1404,6 +1425,17 @@ impl App {
             });
         });
         None
+    }
+
+    /// A callout's title was tapped in the preview: fold or unfold it.
+    fn toggle_callout(self: &Rc<Self>, pos: usize) {
+        {
+            let mut t = self.callouts_toggled.borrow_mut();
+            if !t.1.remove(&pos) {
+                t.1.insert(pos);
+            }
+        }
+        self.update_preview();
     }
 
     /// A checkbox in the preview was tapped: flip `[ ]` / `[x]` at `pos`.
@@ -1640,6 +1672,7 @@ pub fn run(
         link_query: Cell::new(None),
         migration_later: Cell::new(false),
         cursor_request: Cell::new(0),
+        callouts_toggled: RefCell::default(),
         pending_share: RefCell::default(),
         save_timer: Timer::default(),
         sync_timer: Timer::default(),
@@ -1689,6 +1722,7 @@ pub fn run(
     ui.on_link_typed(|t, c, p| with_app(|a| a.link_typed(&t, c.max(0) as usize, &p)));
     ui.on_pick_link(|n| with_app(|a| a.pick_link(&n)));
     ui.on_toggle_task(|pos| with_app(|a| a.toggle_task(pos.max(0) as usize)));
+    ui.on_toggle_callout(|pos| with_app(|a| a.toggle_callout(pos.max(0) as usize)));
     ui.on_voice_record(|into_note| with_app(|a| a.voice_record(into_note)));
     ui.on_take_photo(|into_note| with_app(|a| a.take_photo(into_note)));
     ui.on_back_pressed(|wide| {

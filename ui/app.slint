@@ -64,6 +64,8 @@ export struct RichRun {
     italic: bool,
     dim: bool,
     underline: bool,
+    // Callout colour (CalloutColors), 0 for the usual.
+    color: int,
     selected: bool,
 }
 
@@ -108,7 +110,7 @@ component Measure inherits Text {
 }
 
 // kind: 0 paragraph, 1-6 heading, 7 code, 8 quote, 9 list item, 10 rule,
-// 11 image (shown), 12 link (tap to open)
+// 11 image (shown), 12 link (tap to open), 13 task, 14 callout title
 export struct MdBlock {
     kind: int,
     text: string,
@@ -116,8 +118,23 @@ export struct MdBlock {
     image: image,
     target: string,
     // Task items (kind 13): ticked, and where their box is in the text.
+    // In a callout: where the callout starts.
     checked: bool,
     pos: int,
+    // The callout the block is in: 0 none, 1 blue, 2 green, 3 orange,
+    // 4 red, 5 purple, 6 grey; whether it folds, and is folded.
+    callout: int,
+    foldable: bool,
+    folded: bool,
+    // The callout's last row (space follows it).
+    callout-last: bool,
+}
+
+// A callout's colour.
+global CalloutColors {
+    public pure function get(c: int) -> color {
+        return c == 1 ? #3b82f6 : c == 2 ? #22a55b : c == 3 ? #e8912d : c == 4 ? #e5484d : c == 5 ? #8b5cf6 : #8a8a8a;
+    }
 }
 
 // state: 0 ok, 1 syncing, 2 error, 3 conflicts, 4 local only
@@ -549,13 +566,46 @@ component PreviewView inherits Rectangle {
     in property <[MdBlock]> blocks;
     callback open-link(string);
     callback toggle-task(int);
+    callback toggle-callout(int);
     ListView {
-        for b in root.blocks: HorizontalLayout {
-            padding-left: 12px + b.indent * 20px;
-            padding-right: 12px;
-            padding-top: b.kind >= 1 && b.kind <= 6 ? 12px : 4px;
-            padding-bottom: 4px;
+        // A callout's rows share its tinted box, with a bar on the left.
+        // Callouts have some space above and below.
+        for b in root.blocks: Rectangle {
+          property <length> gap-top: b.kind == 14 ? 8px : 0px;
+          property <length> gap-bottom: b.callout-last ? 8px : 0px;
+          if b.callout > 0: Rectangle {
+            x: 12px;
+            y: parent.gap-top;
+            width: parent.width - 24px;
+            height: parent.height - parent.gap-top - parent.gap-bottom;
+            background: CalloutColors.get(b.callout).with-alpha(0.12);
+            Rectangle {
+                x: 0;
+                width: 3px;
+                background: CalloutColors.get(b.callout);
+            }
+          }
+          HorizontalLayout {
+            padding-left: 12px + b.indent * 20px + (b.callout > 0 ? 13px : 0px);
+            padding-right: 24px;
+            padding-top: (b.kind >= 1 && b.kind <= 6 ? 12px : b.kind == 14 ? 8px : 4px) + parent.gap-top;
+            padding-bottom: (b.callout-last ? 8px : 4px) + parent.gap-bottom;
             spacing: 10px;
+            if b.kind == 14: Rectangle {
+                height: title.preferred-height;
+                title := Text {
+                    width: parent.width;
+                    text: b.text + (b.foldable ? (b.folded ? "  ▸" : "  ▾") : "");
+                    wrap: word-wrap;
+                    color: CalloutColors.get(b.callout);
+                    font-size: 15px;
+                    font-weight: 700;
+                }
+                if b.foldable: TouchArea {
+                    mouse-cursor: pointer;
+                    clicked => { root.toggle-callout(b.pos); }
+                }
+            }
             if b.kind == 8: Rectangle {
                 width: 3px;
                 background: Palette.accent-background;
@@ -635,6 +685,7 @@ component PreviewView inherits Rectangle {
                     }
                 }
             }
+          }
         }
     }
 }
@@ -932,7 +983,8 @@ component RunText inherits Text {
     font-size: self.run.size;
     font-weight: self.run.bold ? 700 : 400;
     font-italic: self.run.italic;
-    property <color> fg: self.run.selected ? Palette.selection-foreground : Palette.foreground;
+    property <color> fg: self.run.selected ? Palette.selection-foreground
+        : self.run.color > 0 ? CalloutColors.get(self.run.color) : Palette.foreground;
     color: self.run.dim ? self.fg.with-alpha(0.45) : self.fg;
     vertical-alignment: center;
     wrap: no-wrap;
@@ -1370,6 +1422,7 @@ component EditorPane inherits Rectangle {
     callback toggle-preview();
     callback open-link(string);
     callback toggle-task(int);
+    callback toggle-callout(int);
     callback open-history();
     callback select-version(string);
     callback restore-version();
@@ -1517,6 +1570,7 @@ component EditorPane inherits Rectangle {
             blocks: root.blocks;
             open-link(t) => { root.open-link(t); }
             toggle-task(p) => { root.toggle-task(p); }
+            toggle-callout(p) => { root.toggle-callout(p); }
         }
     }
 
@@ -1861,6 +1915,7 @@ export component AppWindow inherits Window {
     callback preview-toggled();
     callback open-link(string);
     callback toggle-task(int);
+    callback toggle-callout(int);
     callback open-history();
     callback select-version(string);
     callback restore-version();
@@ -1985,6 +2040,7 @@ export component AppWindow inherits Window {
                 toggle-preview => { root.preview-toggled(); }
                 open-link(t) => { root.open-link(t); }
                 toggle-task(p) => { root.toggle-task(p); }
+                toggle-callout(p) => { root.toggle-callout(p); }
                 show-history: root.show-history;
                 versions: root.versions;
                 history-selected: root.history-selected;

@@ -10,6 +10,7 @@ Native markdown notes with automatic git sync, for macOS and Android. It's writt
 ## Features
 - Lists every `*.md` file in the notes folder, including subfolders. You can search, create, rename and delete notes. Delete (in a note's ⋮ menu) and `CONFIG.md` only show with **Advanced mode** on (Settings).
 - Markdown editor that shows **bold**, *italic* and bigger headings as you type (with a monospace editor font; the markup stays visible, fainter), autosaves 1 s after you stop typing, plus a native markdown preview.
+- **Callouts**, as in Obsidian: a quote starting with `[!type]` and an optional title (`> [!warning] Careful`) shows in the preview as a coloured box with an icon. `note`, `info`, `tip`, `success`, `question`, `warning`, `failure`, `danger`, `bug`, `example`, `quote` and their aliases each have a colour; `[!type]-` starts folded and `[!type]+` can be folded, with a tap on the title.
 - Git sync over SSH, using an ed25519 key the app generates. Sync runs:
   - on startup, on Android resume, and when you tap the status chip
   - 1 min after the last save (each new save restarts the minute)

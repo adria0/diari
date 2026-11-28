@@ -48,6 +48,8 @@ struct Glyph {
     x: f32,
     w: f32,
     flags: u8,
+    /// Callout colour (`markdown::CalloutColor::code`), 0 outside callouts.
+    color: u8,
     /// Drawn on its own (not in a run): characters the editor font may not
     /// have (their fallback font's width differs), tabs and control chars.
     alone: bool,
@@ -81,6 +83,8 @@ pub struct Run {
     pub italic: bool,
     pub dim: bool,
     pub underline: bool,
+    /// Callout colour (`markdown::CalloutColor::code`), 0 for the usual.
+    pub color: i32,
     /// In the selection: drawn in the selection's text colour.
     pub selected: bool,
 }
@@ -154,11 +158,12 @@ fn class_of(level: usize) -> usize {
     }
 }
 
-/// Style flags for each byte of `text`, and the heading level of each byte
-/// (0 outside headings).
-fn styles(text: &str) -> (Vec<u8>, Vec<u8>) {
+/// Style flags for each byte of `text`, the heading level of each byte (0
+/// outside headings), and its callout colour (0 outside callouts).
+fn styles(text: &str) -> (Vec<u8>, Vec<u8>, Vec<u8>) {
     let mut flags = vec![0u8; text.len()];
     let mut level = vec![0u8; text.len()];
+    let mut color = vec![0u8; text.len()];
     let bytes = text.as_bytes();
     let mark = |flags: &mut Vec<u8>, r: Range<usize>, f: u8| {
         for b in &mut flags[r] {
@@ -178,6 +183,30 @@ fn styles(text: &str) -> (Vec<u8>, Vec<u8>) {
                 let hashes = bytes[r.start..r.end].iter().take_while(|&&c| c == b'#').count();
                 mark(&mut flags, r.start..r.start + hashes, DIM);
             }
+            // A callout's first line: `> [!type]- Title`.
+            Event::Start(Tag::BlockQuote(_)) => {
+                let line_end = text[r.start..].find('\n').map_or(text.len(), |i| r.start + i);
+                let line = &text[r.start..line_end];
+                let Some(open) = line.find("[!") else { continue };
+                if !line[..open].chars().all(|c| c == '>' || c == ' ')
+                    || crate::markdown::parse_callout_line(&line[open..]).is_none()
+                {
+                    continue;
+                }
+                let Some((kind, _, _)) = crate::markdown::parse_callout_line(&line[open..]) else { continue };
+                // The whole callout takes its colour (a nested one, its own).
+                let c = crate::markdown::callout_color(&kind).code() as u8;
+                for b in &mut color[r.clone()] {
+                    *b = c;
+                }
+                let Some(close) = line[open..].find(']') else { continue };
+                let mut end = r.start + open + close + 1;
+                if matches!(bytes.get(end), Some(b'-' | b'+')) {
+                    end += 1;
+                }
+                mark(&mut flags, r.start + open..end, DIM);
+                mark(&mut flags, end..line_end, BOLD);
+            }
             Event::Start(Tag::Strong) | Event::Start(Tag::Emphasis) => {
                 let (f, n) = if matches!(ev, Event::Start(Tag::Strong)) { (BOLD, 2) } else { (ITALIC, 1) };
                 mark(&mut flags, r.clone(), f);
@@ -192,7 +221,7 @@ fn styles(text: &str) -> (Vec<u8>, Vec<u8>) {
             _ => {}
         }
     }
-    (flags, level)
+    (flags, level, color)
 }
 
 impl Layout {
@@ -208,7 +237,7 @@ impl Layout {
             d.push_str(&text[pre_at..]);
             d
         };
-        let (mut flags, level) = styles(&display);
+        let (mut flags, level, color) = styles(&display);
         for f in &mut flags[pre_at..pre_at + preedit.len()] {
             *f |= PREEDIT;
         }
@@ -288,6 +317,7 @@ impl Layout {
                         x: (c - base) as f32 * adv,
                         w: w as f32 * adv,
                         flags: flags[s],
+                        color: color[s],
                         alone,
                         blank,
                     });
@@ -515,7 +545,7 @@ impl Layout {
                 let g = &gs[i];
                 let mut j = i + 1;
                 if !g.alone {
-                    while j < gs.len() && !gs[j].alone && gs[j].flags == g.flags && selected(&gs[j]) == selected(g) {
+                    while j < gs.len() && !gs[j].alone && gs[j].flags == g.flags && gs[j].color == g.color && selected(&gs[j]) == selected(g) {
                         j += 1;
                     }
                 }
@@ -534,6 +564,7 @@ impl Layout {
                         italic: g.flags & ITALIC != 0,
                         dim: g.flags & DIM != 0,
                         underline,
+                        color: g.color as i32,
                         selected: selected(g),
                     });
                 }
@@ -628,6 +659,7 @@ pub fn install(ui: &crate::AppWindow) {
                     italic: r.italic,
                     dim: r.dim,
                     underline: r.underline,
+                    color: r.color,
                     selected: r.selected,
                 })
                 .collect()
@@ -714,6 +746,21 @@ mod tests {
         assert_eq!(l.height, 60.0);
         // Heading text is placed on its bigger grid (" T" after "#").
         assert_eq!(find("T").x, 9.0);
+    }
+
+    #[test]
+    fn callout_title_line() {
+        let l = Layout::new("> [!tip]- Bona idea\n> text", 0, "", 600.0, &m());
+        let r = l.runs(0.0, 100.0, (0, 0));
+        let v: Vec<(&str, bool, bool, i32)> = r.iter().map(|r| (r.text.as_str(), r.bold, r.dim, r.color)).collect();
+        // All of it green (tip), like the callout in the preview.
+        assert_eq!(
+            v,
+            vec![("> ", false, false, 2), ("[!tip]-", false, true, 2), (" Bona idea", true, false, 2), ("> text", false, false, 2)]
+        );
+        // A plain quote keeps the usual colour.
+        let l = Layout::new("> plain", 0, "", 600.0, &m());
+        assert!(l.runs(0.0, 100.0, (0, 0)).iter().all(|r| r.color == 0));
     }
 
     #[test]

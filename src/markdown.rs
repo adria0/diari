@@ -12,6 +12,9 @@ pub enum Kind {
     /// A task list item (`- [ ] …` / `- [x] …`).
     Task { done: bool },
     Rule,
+    /// The title row of a callout (`> [!warning] Title`); the blocks inside
+    /// it follow, with the same `callout`.
+    CalloutTitle,
     /// A link (`[label](target)` or `![alt](target)`), shown below the text
     /// it appears in: the app shows local images and opens everything else.
     Link,
@@ -29,6 +32,7 @@ impl Kind {
             Kind::Task { .. } => 13,
             Kind::Rule => 10,
             Kind::Link => 12,
+            Kind::CalloutTitle => 14,
         }
     }
 }
@@ -43,7 +47,97 @@ pub struct Block {
     /// `Kind::Link` written as an image (`![alt](target)`).
     pub image: bool,
     /// `Kind::Task`: byte offset in the source of its `[ ]` / `[x]`.
+    /// In a callout: where the callout starts (identifies it).
     pub pos: usize,
+    /// The callout this block is in (its title row included), if any.
+    pub callout: Option<Callout>,
+}
+
+/// An Obsidian callout: a quote whose first line is `[!type]`, optionally
+/// followed by `-` (folded) or `+` (foldable, open) and a title.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Callout {
+    pub color: CalloutColor,
+    /// Byte offset in the source where the callout starts.
+    pub pos: usize,
+    /// `Some(folded)` if it can be folded: folded at first with `-`.
+    pub fold: Option<bool>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CalloutColor {
+    Blue,
+    Green,
+    Orange,
+    Red,
+    Purple,
+    Grey,
+}
+
+impl CalloutColor {
+    /// Integer encoding shared with `ui/app.slint` (MdBlock.callout).
+    pub fn code(self) -> i32 {
+        match self {
+            CalloutColor::Blue => 1,
+            CalloutColor::Green => 2,
+            CalloutColor::Orange => 3,
+            CalloutColor::Red => 4,
+            CalloutColor::Purple => 5,
+            CalloutColor::Grey => 6,
+        }
+    }
+}
+
+/// The colour of a callout type.
+pub fn callout_color(kind: &str) -> CalloutColor {
+    callout_style(kind).0
+}
+
+/// The type's colour and icon (Obsidian's types and their aliases; unknown
+/// types look like a note).
+fn callout_style(kind: &str) -> (CalloutColor, &'static str) {
+    use CalloutColor::*;
+    match kind {
+        "abstract" | "summary" | "tldr" => (Blue, "📄"),
+        "info" => (Blue, "ℹ️"),
+        "todo" => (Blue, "☑️"),
+        "tip" | "hint" | "important" => (Green, "💡"),
+        "success" | "check" | "done" => (Green, "✅"),
+        "question" | "help" | "faq" => (Orange, "❓"),
+        "warning" | "caution" | "attention" => (Orange, "⚠️"),
+        "failure" | "fail" | "missing" => (Red, "❌"),
+        "danger" | "error" => (Red, "⛔"),
+        "bug" => (Red, "🐞"),
+        "example" => (Purple, "📋"),
+        "quote" | "cite" => (Grey, "❝"),
+        _ => (Blue, "📝"),
+    }
+}
+
+/// A callout's first line (`[!type]-  Title`, after the `>`): its type,
+/// fold marker and title. The title defaults to the type's name.
+pub fn parse_callout_line(line: &str) -> Option<(String, Option<bool>, String)> {
+    let rest = line.trim_start().strip_prefix("[!")?;
+    let end = rest.find(']')?;
+    let kind = rest[..end].trim().to_lowercase();
+    if kind.is_empty() || kind.contains(char::is_whitespace) {
+        return None;
+    }
+    let mut rest = &rest[end + 1..];
+    let fold = match rest.chars().next() {
+        Some('-') => Some(true),
+        Some('+') => Some(false),
+        _ => None,
+    };
+    if fold.is_some() {
+        rest = &rest[1..];
+    }
+    let mut title = rest.trim().to_string();
+    if title.is_empty() {
+        let mut c = kind.chars();
+        title = c.next().map(|f| f.to_uppercase().collect::<String>() + c.as_str()).unwrap_or_default();
+    }
+    Some((kind, fold, title))
 }
 
 struct State {
@@ -58,6 +152,11 @@ struct State {
     open_link: Option<(String, usize, bool)>,
     /// Offset of the current block's task marker.
     task_pos: usize,
+    /// The callout being read, and the quote depth it started at.
+    callout: Option<(Callout, i32)>,
+    /// The callout's first line (its `[!type] title`) is still in the text
+    /// to come and must be left out.
+    skip_callout_line: bool,
 }
 
 impl State {
@@ -68,12 +167,24 @@ impl State {
             } else {
                 self.buf.trim().to_string()
             };
+            let text = if self.skip_callout_line && kind != Kind::Code {
+                self.skip_callout_line = false;
+                text.split_once('\n').map_or(String::new(), |(_, rest)| rest.trim().to_string())
+            } else {
+                text
+            };
+            let callout = self.callout.map(|(c, _)| c);
             if !text.is_empty() || matches!(kind, Kind::Task { .. }) {
-                let pos = if matches!(kind, Kind::Task { .. }) { self.task_pos } else { 0 };
-                self.out.push(Block { kind, text, indent, target: String::new(), image: false, pos });
+                let pos = match (kind, callout) {
+                    (Kind::Task { .. }, _) => self.task_pos,
+                    (_, Some(c)) => c.pos,
+                    _ => 0,
+                };
+                self.out.push(Block { kind, text, indent, target: String::new(), image: false, pos, callout });
             }
             for (target, label, image) in self.links.drain(..) {
-                self.out.push(Block { kind: Kind::Link, text: label, indent, target, image, pos: 0 });
+                let pos = callout.map_or(0, |c| c.pos);
+                self.out.push(Block { kind: Kind::Link, text: label, indent, target, image, pos, callout });
             }
         }
         self.buf.clear();
@@ -96,14 +207,20 @@ impl State {
         }
     }
 
+    /// Quote levels that indent: the callout's own doesn't.
+    fn quote_depth(&self) -> i32 {
+        self.quote - self.callout.map_or(0, |(_, d)| d)
+    }
+
     fn indent(&self) -> i32 {
-        self.lists.len().saturating_sub(1) as i32 + self.quote
+        self.lists.len().saturating_sub(1) as i32 + self.quote_depth()
     }
 
     fn ensure_open(&mut self) {
         if self.cur.is_none() {
-            let kind = if self.quote > 0 { Kind::Quote } else { Kind::Para };
-            let indent = if self.lists.is_empty() { (self.quote - 1).max(0) } else { self.lists.len() as i32 };
+            let q = self.quote_depth();
+            let kind = if q > 0 { Kind::Quote } else { Kind::Para };
+            let indent = if self.lists.is_empty() { (q - 1).max(0) } else { self.lists.len() as i32 };
             self.cur = Some((kind, indent));
         }
     }
@@ -124,6 +241,8 @@ pub fn parse(src: &str) -> Vec<Block> {
         links: Vec::new(),
         open_link: None,
         task_pos: 0,
+        callout: None,
+        skip_callout_line: false,
     };
 
     for (ev, range) in Parser::new_ext(src, opts).into_offset_iter() {
@@ -149,6 +268,26 @@ pub fn parse(src: &str) -> Vec<Block> {
                 Tag::BlockQuote(_) => {
                     s.flush();
                     s.quote += 1;
+                    // A callout? Its first line, after the `>`s.
+                    if s.callout.is_none() {
+                        let first = src[range.clone()].lines().next().unwrap_or("");
+                        let line = first.trim_start().trim_start_matches(['>', ' ']);
+                        if let Some((kind, fold, title)) = parse_callout_line(line) {
+                            let (color, icon) = callout_style(&kind);
+                            let c = Callout { color, pos: range.start, fold };
+                            s.out.push(Block {
+                                kind: Kind::CalloutTitle,
+                                text: format!("{icon} {title}"),
+                                indent: (s.quote - 1).max(0) + s.lists.len() as i32,
+                                target: String::new(),
+                                image: false,
+                                pos: range.start,
+                                callout: Some(c),
+                            });
+                            s.callout = Some((c, s.quote));
+                            s.skip_callout_line = true;
+                        }
+                    }
                 }
                 Tag::List(start) => {
                     s.flush();
@@ -185,6 +324,10 @@ pub fn parse(src: &str) -> Vec<Block> {
                 TagEnd::Heading(_) | TagEnd::CodeBlock | TagEnd::Item | TagEnd::Paragraph => s.flush(),
                 TagEnd::BlockQuote(_) => {
                     s.flush();
+                    if s.callout.is_some_and(|(_, d)| d == s.quote) {
+                        s.callout = None;
+                        s.skip_callout_line = false;
+                    }
                     s.quote -= 1;
                 }
                 TagEnd::List(_) => {
@@ -224,6 +367,7 @@ pub fn parse(src: &str) -> Vec<Block> {
                     target: String::new(),
                     image: false,
                     pos: 0,
+                    callout: s.callout.map(|(c, _)| c),
                 });
             }
             // The item becomes a task: drop its bullet, keep where the box is.
@@ -346,6 +490,38 @@ mod tests {
         assert_eq!(b[0].text, "Anar a Montjoia amb l'Aran");
         let links: Vec<_> = b.iter().filter(|b| b.kind == Kind::Link).map(|b| (b.text.as_str(), b.target.as_str())).collect();
         assert_eq!(links, vec![("Montjoia", "[[Montjoia]]"), ("l'Aran", "[[Aran]]")]);
+    }
+
+    #[test]
+    fn callouts() {
+        let src = "Before\n\n> [!warning] Compte\n> El servidor es reinicia.\n> - desa\n\n> [!tip]-\n> Amagat\n\n> [!nota]\n\n> just a quote\n";
+        let b = parse(src);
+        let got: Vec<_> = b.iter().map(|b| (b.kind, b.text.as_str(), b.indent, b.callout.map(|c| (c.color, c.fold)))).collect();
+        use CalloutColor::*;
+        assert_eq!(
+            got,
+            vec![
+                (Kind::Para, "Before", 0, None),
+                (Kind::CalloutTitle, "⚠️ Compte", 0, Some((Orange, None))),
+                (Kind::Para, "El servidor es reinicia.", 0, Some((Orange, None))),
+                (Kind::ListItem, "• desa", 0, Some((Orange, None))),
+                (Kind::CalloutTitle, "💡 Tip", 0, Some((Green, Some(true)))),
+                (Kind::Para, "Amagat", 0, Some((Green, Some(true)))),
+                (Kind::CalloutTitle, "📝 Nota", 0, Some((Blue, None))),
+                (Kind::Quote, "just a quote", 0, None),
+            ]
+        );
+        // Blocks know their callout by where it starts.
+        assert_eq!(&src[b[1].pos..b[1].pos + 2], "> ");
+        assert!(b[1..4].iter().all(|x| x.pos == b[1].pos));
+    }
+
+    #[test]
+    fn callout_lines() {
+        assert_eq!(parse_callout_line("[!NOTE]"), Some(("note".into(), None, "Note".into())));
+        assert_eq!(parse_callout_line("[!faq]+ Per què?"), Some(("faq".into(), Some(false), "Per què?".into())));
+        assert_eq!(parse_callout_line("[! two words]"), None);
+        assert_eq!(parse_callout_line("[link]"), None);
     }
 
     #[test]
