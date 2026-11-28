@@ -28,6 +28,8 @@ const ITALIC: u8 = 2;
 const DIM: u8 = 4;
 /// Text an input method is composing: underlined.
 const PREEDIT: u8 = 8;
+/// `==highlighted==` text: drawn on a coloured background.
+const HIGHLIGHT: u8 = 16;
 
 /// The editor font, measured by the UI for each size class.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
@@ -83,6 +85,8 @@ pub struct Run {
     pub italic: bool,
     pub dim: bool,
     pub underline: bool,
+    /// Highlighted (`==text==`).
+    pub highlight: bool,
     /// Callout colour (`markdown::CalloutColor::code`), 0 for the usual.
     pub color: i32,
     /// In the selection: drawn in the selection's text colour.
@@ -171,9 +175,20 @@ fn styles(text: &str) -> (Vec<u8>, Vec<u8>, Vec<u8>) {
         }
     };
     let opts = Options::ENABLE_STRIKETHROUGH | Options::ENABLE_TASKLISTS;
+    let mut in_code_block = false;
     for (ev, r) in Parser::new_ext(text, opts).into_offset_iter() {
         let r = r.start.min(text.len())..r.end.min(text.len());
         match ev {
+            Event::Start(Tag::CodeBlock(_)) => in_code_block = true,
+            Event::End(pulldown_cmark::TagEnd::CodeBlock) => in_code_block = false,
+            Event::Text(_) if !in_code_block => {
+                for h in crate::markdown::highlight_ranges(&text[r.clone()]) {
+                    let h = r.start + h.start..r.start + h.end;
+                    mark(&mut flags, h.clone(), HIGHLIGHT);
+                    mark(&mut flags, h.start..h.start + 2, DIM);
+                    mark(&mut flags, h.end - 2..h.end, DIM);
+                }
+            }
             Event::Start(Tag::Heading { level: l, .. }) => {
                 for b in &mut level[r.clone()] {
                     *b = l as u8;
@@ -564,6 +579,7 @@ impl Layout {
                         italic: g.flags & ITALIC != 0,
                         dim: g.flags & DIM != 0,
                         underline,
+                        highlight: g.flags & HIGHLIGHT != 0,
                         color: g.color as i32,
                         selected: selected(g),
                     });
@@ -659,6 +675,7 @@ pub fn install(ui: &crate::AppWindow) {
                     italic: r.italic,
                     dim: r.dim,
                     underline: r.underline,
+                    highlight: r.highlight,
                     color: r.color,
                     selected: r.selected,
                 })
@@ -761,6 +778,26 @@ mod tests {
         // A plain quote keeps the usual colour.
         let l = Layout::new("> plain", 0, "", 600.0, &m());
         assert!(l.runs(0.0, 100.0, (0, 0)).iter().all(|r| r.color == 0));
+    }
+
+    #[test]
+    fn highlights() {
+        let l = Layout::new("a ==hi there== b\n```\n==no==\n```", 0, "", 600.0, &m());
+        let r = l.runs(0.0, 100.0, (0, 0));
+        let v: Vec<(&str, bool, bool)> = r.iter().map(|r| (r.text.as_str(), r.highlight, r.dim)).collect();
+        assert_eq!(
+            v,
+            vec![
+                ("a ", false, false),
+                ("==", true, true),
+                ("hi there", true, false),
+                ("==", true, true),
+                (" b", false, false),
+                ("```", false, false),
+                ("==no==", false, false),
+                ("```", false, false),
+            ]
+        );
     }
 
     #[test]

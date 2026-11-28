@@ -64,6 +64,8 @@ export struct RichRun {
     italic: bool,
     dim: bool,
     underline: bool,
+    // ==Highlighted==: drawn on a coloured background.
+    highlight: bool,
     // Callout colour (CalloutColors), 0 for the usual.
     color: int,
     selected: bool,
@@ -1008,6 +1010,8 @@ component RunText inherits Text {
 // rows are handled here. With another font it's a plain TextInput.
 component NoteEditor inherits Rectangle {
     in-out property <string> text <=> input.text;
+    // Shown but not editable (the markdown help).
+    in property <bool> read-only <=> input.read-only;
     callback edited(string);
     // After each change: the text, the cursor (byte offset) and the word
     // the keyboard is still composing (not in the text yet).
@@ -1171,10 +1175,19 @@ component NoteEditor inherits Rectangle {
                     height: r.h;
                     background: Palette.selection-background;
                 }
+                // Highlights, behind the text.
+                for r in root.runs: Rectangle {
+                    visible: r.highlight;
+                    x: r.x;
+                    y: r.y + 1px;
+                    width: r.w;
+                    height: r.h - 2px;
+                    background: #f5c518.with-alpha(0.35);
+                }
                 for r in root.runs: RunText {
                     run: r;
                 }
-                if input.has-focus && root.blink-on && !input.has-selection: Rectangle {
+                if input.has-focus && root.blink-on && !input.has-selection && !root.read-only: Rectangle {
                     x: root.caret.x - 1px;
                     y: root.caret.y;
                     width: 2.5px;
@@ -1329,6 +1342,35 @@ component NoteEditor inherits Rectangle {
     }
 }
 
+// What markdown a note can have, as markdown: shown in the editor, so with
+// its styles and colours (ui/markdown-help.md).
+component HelpPane inherits VerticalLayout {
+    in property <string> text;
+    callback close();
+
+    spacing: 8px;
+    HorizontalLayout {
+        spacing: 8px;
+        Text {
+            text: "Markdown help";
+            font-size: 14px;
+            font-weight: 600;
+            vertical-alignment: center;
+            color: Palette.foreground;
+            horizontal-stretch: 1;
+        }
+        Button {
+            text: "Close";
+            clicked => { root.close(); }
+        }
+    }
+    NoteEditor {
+        vertical-stretch: 1;
+        read-only: true;
+        text: root.text;
+    }
+}
+
 // A small tappable label. Unlike a Button it doesn't take the focus, so the
 // editor (and the phone's keyboard) stay as they are.
 component Chip inherits Rectangle {
@@ -1411,8 +1453,11 @@ component EditorPane inherits Rectangle {
     callback pick-link(string);
     in property <int> cursor-request;
     in property <int> cursor-request-pos;
-    // A pane (history, files, check) is shown instead of the note.
-    property <bool> pane-open: root.show-history || root.show-files || root.show-check;
+    // The markdown help, from the menu.
+    in-out property <bool> show-help;
+    in property <string> help-text;
+    // A pane (history, files, check, help) is shown instead of the note.
+    property <bool> pane-open: root.show-history || root.show-files || root.show-check || root.show-help;
     in property <[VersionItem]> versions;
     in property <string> history-selected;
     in property <string> history-text;
@@ -1440,6 +1485,7 @@ component EditorPane inherits Rectangle {
     changed path => {
         root.confirm-delete = false;
         root.renaming = false;
+        root.show-help = false;
     }
 
     background: Palette.background;
@@ -1524,6 +1570,11 @@ component EditorPane inherits Rectangle {
                 accessible-label: "Menu";
                 clicked => { menu.show(); }
             }
+        }
+        if root.show-help: HelpPane {
+            vertical-stretch: 1;
+            text: root.help-text;
+            close => { root.show-help = false; }
         }
         if root.show-check: CheckPane {
             vertical-stretch: 1;
@@ -1617,6 +1668,11 @@ component EditorPane inherits Rectangle {
                     icon-size: 16px;
                     enabled: !root.pane-open;
                     clicked => { root.open-files(); }
+                }
+                Button {
+                    text: "Markdown help";
+                    enabled: !root.pane-open;
+                    clicked => { root.show-help = true; }
                 }
                 if root.is-config: Button {
                     text: "Check config";
@@ -1854,6 +1910,9 @@ export component AppWindow inherits Window {
     in property <bool> current-is-config;
     in-out property <bool> show-check;
     in property <string> check-text;
+    // The markdown help, from a note's menu (set from ui/markdown-help.md).
+    in-out property <bool> show-help;
+    in property <string> help-text;
     callback check-config();
     callback close-check();
     // Voice notes: 0 idle, 1 asking to download the model, 2 recording,
@@ -1947,6 +2006,7 @@ export component AppWindow inherits Window {
     changed show-files => { keys.focus(); }
     changed show-history => { keys.focus(); }
     changed show-check => { keys.focus(); }
+    changed show-help => { keys.focus(); }
     keys := FocusScope {
         x: root.inset-left;
         y: root.inset-top;
@@ -2056,6 +2116,8 @@ export component AppWindow inherits Window {
                 is-config: root.current-is-config;
                 show-check: root.show-check;
                 check-text: root.check-text;
+                show-help <=> root.show-help;
+                help-text: root.help-text;
                 check-config => { root.check-config(); }
                 close-check => { root.close-check(); }
                 voice => { root.voice-record(true); }

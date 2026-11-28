@@ -88,6 +88,43 @@ impl CalloutColor {
     }
 }
 
+/// Highlights (`==text==`) in a piece of text: byte ranges from the opening
+/// `==` to after the closing one. The text can't start or end with a space,
+/// and a run of three or more `=` isn't a marker.
+pub fn highlight_ranges(s: &str) -> Vec<std::ops::Range<usize>> {
+    let b = s.as_bytes();
+    let is_marker = |i: usize| {
+        i + 1 < b.len() && b[i] == b'=' && b[i + 1] == b'=' && (i == 0 || b[i - 1] != b'=') && b.get(i + 2) != Some(&b'=')
+    };
+    let mut out = Vec::new();
+    let mut i = 0;
+    while i + 1 < b.len() {
+        if is_marker(i) && b.get(i + 2).is_some_and(|c| !c.is_ascii_whitespace()) {
+            let close = (i + 3..b.len().saturating_sub(1)).find(|&j| is_marker(j) && !b[j - 1].is_ascii_whitespace());
+            if let Some(j) = close {
+                out.push(i..j + 2);
+                i = j + 2;
+                continue;
+            }
+        }
+        i += 1;
+    }
+    out
+}
+
+/// The text without its highlight markers (the preview shows plain text).
+fn strip_highlights(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    let mut last = 0;
+    for r in highlight_ranges(s) {
+        out.push_str(&s[last..r.start]);
+        out.push_str(&s[r.start + 2..r.end - 2]);
+        last = r.end;
+    }
+    out.push_str(&s[last..]);
+    out
+}
+
 /// The colour of a callout type.
 pub fn callout_color(kind: &str) -> CalloutColor {
     callout_style(kind).0
@@ -173,6 +210,7 @@ impl State {
             } else {
                 text
             };
+            let text = if kind == Kind::Code { text } else { strip_highlights(&text) };
             let callout = self.callout.map(|(c, _)| c);
             if !text.is_empty() || matches!(kind, Kind::Task { .. }) {
                 let pos = match (kind, callout) {
@@ -514,6 +552,15 @@ mod tests {
         // Blocks know their callout by where it starts.
         assert_eq!(&src[b[1].pos..b[1].pos + 2], "> ");
         assert!(b[1..4].iter().all(|x| x.pos == b[1].pos));
+    }
+
+    #[test]
+    fn highlights() {
+        assert_eq!(highlight_ranges("a ==b c== d ==e=="), vec![2..9, 12..17]);
+        assert!(highlight_ranges("== no == ===x=== a==").is_empty());
+        let b = parse("Some ==marked== text\n\n```\n==code==\n```\n");
+        assert_eq!(b[0].text, "Some marked text");
+        assert_eq!(b[1].text, "==code==");
     }
 
     #[test]

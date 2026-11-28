@@ -586,6 +586,8 @@ impl App {
             ui.set_show_settings(false);
         } else if ui.get_show_check() {
             self.close_check();
+        } else if ui.get_show_help() {
+            ui.set_show_help(false);
         } else if ui.get_show_files() {
             self.close_files();
         } else if ui.get_show_history() {
@@ -1642,6 +1644,7 @@ pub fn run(
     #[cfg(target_os = "macos")]
     let _ = slint::invoke_from_event_loop(macos::set_dock_icon);
     ui.set_desktop(desktop);
+    ui.set_help_text(include_str!("../ui/markdown-help.md").into());
     ui.set_default_font(default_mono_font().into());
     apply_font(&ui, &shared.config.lock().unwrap());
 
