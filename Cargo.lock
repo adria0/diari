@@ -1287,6 +1287,8 @@ dependencies = [
  "ssh-key",
  "tempfile",
  "toml 0.9.12+spec-1.1.0",
+ "unicode-segmentation",
+ "unicode-width",
  "ureq",
  "whisper-rs",
 ]

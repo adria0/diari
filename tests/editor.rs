@@ -10,6 +10,7 @@ use std::rc::Rc;
 fn typing_reaches_the_note() {
     i_slint_backend_testing::init_no_event_loop();
     let ui = AppWindow::new().unwrap();
+    diari::richedit::install(&ui);
     ui.window().set_size(slint::LogicalSize::new(1200., 800.));
     ui.show().unwrap();
     ui.set_current_path("n.md".into());

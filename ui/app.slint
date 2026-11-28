@@ -40,6 +40,73 @@ export global EditorFont {
     in-out property <length> size: 14px;
 }
 
+// The note editor's styled view (src/richedit.rs): the editor font measured
+// for each size class (0 body, 1-3 headings 3, 2, 1), and the layout's pieces.
+export struct RichMetrics {
+    size0: length, size1: length, size2: length, size3: length,
+    adv0: length, adv1: length, adv2: length, adv3: length,
+    lh0: length, lh1: length, lh2: length, lh3: length,
+}
+
+export struct RichLayout {
+    gen: int,
+    height: length,
+}
+
+export struct RichRun {
+    text: string,
+    x: length,
+    y: length,
+    w: length,
+    h: length,
+    size: length,
+    bold: bool,
+    italic: bool,
+    dim: bool,
+    underline: bool,
+    selected: bool,
+}
+
+export struct RichRect {
+    x: length,
+    y: length,
+    w: length,
+    h: length,
+}
+
+export struct RichRange {
+    start: int,
+    end: int,
+}
+
+// Implemented in Rust. `gen` identifies the layout the other calls use.
+export global RichEdit {
+    // text, cursor, preedit, width, metrics
+    pure callback layout(string, int, string, length, RichMetrics) -> RichLayout;
+    // gen, top, bottom, anchor, cursor: the runs to draw between top and
+    // bottom, split where the selection starts and ends.
+    pure callback runs(int, length, length, int, int) -> [RichRun];
+    // gen, cursor
+    pure callback caret(int, int) -> RichRect;
+    // gen, anchor, cursor
+    pure callback selection(int, int, int) -> [RichRect];
+    // gen, x, y: the offset there.
+    pure callback hit(int, length, length) -> int;
+    // gen, offset: the word there.
+    pure callback word(int, int) -> RichRange;
+    // gen, cursor, move (0 up, 1 down, 2 page up, 3 page down, 4 row start,
+    // 5 row end, 6 left, 7 right), page height: the new cursor.
+    callback move(int, int, int, length) -> int;
+}
+
+// Measures the editor font: 20 characters wide.
+component Measure inherits Text {
+    visible: false;
+    font-family: EditorFont.family;
+    text: "MMMMMMMMMMMMMMMMMMMM";
+    out property <length> adv: self.preferred-width / 20;
+}
+
 // kind: 0 paragraph, 1-6 heading, 7 code, 8 quote, 9 list item, 10 rule,
 // 11 image (shown), 12 link (tap to open)
 export struct MdBlock {
@@ -852,8 +919,41 @@ component HistoryPane inherits VerticalLayout {
     }
 }
 
-// The note's text editor. Like the standard TextEdit (whose background
-// can't be changed), but on paper-coloured background in the light theme.
+// One run of the styled editor's text.
+component RunText inherits Text {
+    in property <RichRun> run;
+    x: self.run.x;
+    y: self.run.y;
+    // A little slack: a fallback font's glyph may be wider.
+    width: self.run.w + self.run.size;
+    height: self.run.h;
+    text: self.run.text;
+    font-family: EditorFont.family;
+    font-size: self.run.size;
+    font-weight: self.run.bold ? 700 : 400;
+    font-italic: self.run.italic;
+    property <color> fg: self.run.selected ? Palette.selection-foreground : Palette.foreground;
+    color: self.run.dim ? self.fg.with-alpha(0.45) : self.fg;
+    vertical-alignment: center;
+    wrap: no-wrap;
+    accessible-role: none;
+    if root.run.underline: Rectangle {
+        x: 0;
+        y: parent.height - 2px;
+        width: root.run.w;
+        height: 1px;
+        background: root.fg;
+    }
+}
+
+// The note's text editor, on a paper-coloured background in the light theme
+// (the standard TextEdit's background can't be changed).
+//
+// With a monospace editor font it shows the markdown styled: bold, italic
+// and bigger headings (src/richedit.rs). A TextInput still takes the typing
+// (keys, input methods, undo, clipboard) but is hidden: the text, cursor and
+// selection are drawn from the layout, and clicks and the keys that move by
+// rows are handled here. With another font it's a plain TextInput.
 component NoteEditor inherits Rectangle {
     in-out property <string> text <=> input.text;
     callback edited(string);
@@ -864,7 +964,6 @@ component NoteEditor inherits Rectangle {
     in property <int> cursor-request;
     in property <int> cursor-request-pos;
     property <string> preedit: input.preedit-text;
-    changed preedit => { root.typed(input.text, input.cursor-position-byte-offset, input.preedit-text); }
     changed cursor-request => {
         input.set-selection-offsets(root.cursor-request-pos, root.cursor-request-pos);
         input.focus();
@@ -878,7 +977,100 @@ component NoteEditor inherits Rectangle {
     accessible-role: text-input;
     accessible-value: root.text;
 
-    ContextMenuArea {
+    // The editor font at each size class; styled only if it's monospace
+    // with bold and italic as wide as regular.
+    m0 := Measure { font-size: EditorFont.size; }
+    m1 := Measure { font-size: EditorFont.size * 1.15; }
+    m2 := Measure { font-size: EditorFont.size * 1.3; }
+    m3 := Measure { font-size: EditorFont.size * 1.5; }
+    b0 := Measure { font-size: EditorFont.size; font-weight: 700; }
+    b1 := Measure { font-size: EditorFont.size * 1.15; font-weight: 700; }
+    b2 := Measure { font-size: EditorFont.size * 1.3; font-weight: 700; }
+    b3 := Measure { font-size: EditorFont.size * 1.5; font-weight: 700; }
+    i0 := Measure { font-size: EditorFont.size; font-italic: true; }
+    n0 := Measure { font-size: EditorFont.size; text: "iiiiiiiiiiiiiiiiiiii"; }
+    function same(a: length, b: length) -> bool {
+        return abs(a - b) <= a * 0.01;
+    }
+    property <bool> rich: m0.adv > 0 && same(m0.adv, n0.adv) && same(m0.adv, i0.adv)
+        && same(m0.adv, b0.adv) && same(m1.adv, b1.adv) && same(m2.adv, b2.adv) && same(m3.adv, b3.adv);
+    property <RichMetrics> metrics: {
+        size0: m0.font-size, size1: m1.font-size, size2: m2.font-size, size3: m3.font-size,
+        adv0: m0.adv, adv1: m1.adv, adv2: m2.adv, adv3: m3.adv,
+        lh0: m0.preferred-height, lh1: m1.preferred-height, lh2: m2.preferred-height, lh3: m3.preferred-height,
+    };
+
+    // The layout, and what's drawn from it.
+    property <RichLayout> lay: root.rich ? RichEdit.layout(input.text, input.preedit-text == "" ? 0 : input.cursor-position-byte-offset, input.preedit-text, scroll.visible-width, root.metrics) : { gen: 0, height: 0 };
+    property <RichRect> caret: root.rich ? RichEdit.caret(root.lay.gen, input.cursor-position-byte-offset) : { };
+    // Runs are asked for in bands of the view, so scrolling a little
+    // doesn't redo them.
+    property <length> band: 400px;
+    property <length> run-top: (floor(-scroll.content-y / root.band) - 1) * root.band;
+    property <[RichRun]> runs: root.rich ? RichEdit.runs(root.lay.gen, root.run-top, root.run-top + scroll.visible-height + 3 * root.band, input.anchor-position-byte-offset, input.cursor-position-byte-offset) : [];
+    property <[RichRect]> sel: root.rich && input.has-selection ? RichEdit.selection(root.lay.gen, input.anchor-position-byte-offset, input.cursor-position-byte-offset) : [];
+    // The cursor blinks, and shows steadily while it moves.
+    property <bool> blink-on: true;
+    changed caret => {
+        root.blink-on = true;
+        if root.rich {
+            root.show(root.caret.y, root.caret.h);
+        }
+    }
+    blink := Timer {
+        interval: 530ms;
+        running: root.rich && input.has-focus;
+        triggered => { root.blink-on = !root.blink-on; }
+    }
+
+    // Scroll so that y..y+h is in view.
+    function show(y: length, h: length) {
+        if y + scroll.content-y < 0px {
+            scroll.content-y = min(0px, max(scroll.visible-height - scroll.content-height, -y));
+        } else if y + h + scroll.content-y > scroll.visible-height {
+            scroll.content-y = min(0px, max(scroll.visible-height - scroll.content-height, scroll.visible-height - y - h));
+        }
+    }
+
+    property <bool> android: Platform.os == OperatingSystemType.android;
+
+    changed preedit => { root.typed(input.text, input.cursor-position-byte-offset, input.preedit-text); }
+
+    // Android: after a click committed a word being composed, the keyboard
+    // starts again and, from where the word was, puts the cursor back at
+    // its end. For a moment, the cursor is kept where it was clicked.
+    property <int> keep-cursor: -1;
+    keep-timer := Timer {
+        interval: 600ms;
+        running: root.keep-cursor >= 0;
+        triggered => { root.keep-cursor = -1; }
+    }
+
+    // Move the cursor (extending the selection with shift).
+    function go(to: int, extend: bool) {
+        input.set-selection-offsets(extend ? input.anchor-position-byte-offset : to, to);
+    }
+
+    // Before the cursor moves (a click, a key), a word the keyboard is
+    // composing must go into the text where it is, or it would move along
+    // with the cursor: losing the focus commits it on Android (and drops a
+    // pending dead key on desktop). Returns whether there was one; then call
+    // `after-commit` once the cursor has moved.
+    function commit-composing() -> bool {
+        if input.preedit-text == "" {
+            return false;
+        }
+        input.clear-focus();
+        return true;
+    }
+    function after-commit(to: int) {
+        input.focus();
+        if root.android {
+            root.keep-cursor = to;
+        }
+    }
+
+    menu-area := ContextMenuArea {
         Menu {
             MenuItem {
                 title: "Undo";
@@ -915,30 +1107,169 @@ component NoteEditor inherits Rectangle {
             width: parent.width - 24px;
             height: parent.height - 24px;
             content-width: self.visible-width;
-            content-height: max(self.visible-height, input.preferred-height);
+            content-height: max(self.visible-height, root.rich ? root.lay.height : input.preferred-height);
 
-            input := TextInput {
-                single-line: false;
-                wrap: word-wrap;
-                font-family: EditorFont.family;
-                font-size: EditorFont.size;
-                color: Palette.foreground;
-                selection-background-color: Palette.selection-background;
-                selection-foreground-color: Palette.selection-foreground;
-                // The style's default cursor is a hairline that's hard to see.
-                text-cursor-width: 2.5px;
-                page-height: scroll.visible-height;
-                accessible-role: none;
-                edited => {
-                    root.edited(self.text);
-                    root.typed(self.text, self.cursor-position-byte-offset, self.preedit-text);
+            if root.rich: Rectangle {
+                width: scroll.visible-width;
+                height: max(scroll.visible-height, root.lay.height);
+                for r in root.sel: Rectangle {
+                    x: r.x;
+                    y: r.y;
+                    width: r.w;
+                    height: r.h;
+                    background: Palette.selection-background;
                 }
-                // Keep the cursor in view (as the standard TextEdit does).
-                cursor-position-changed(cpos) => {
-                    if (cpos.y + scroll.content-y < 0px) {
-                        scroll.content-y = min(0px, max(scroll.visible-height - self.height, -cpos.y));
-                    } else if (cpos.y + scroll.content-y > scroll.visible-height - EditorFont.size * 1.6) {
-                        scroll.content-y = min(0px, max(scroll.visible-height - self.height, scroll.visible-height - cpos.y - EditorFont.size * 1.6));
+                for r in root.runs: RunText {
+                    run: r;
+                }
+                if input.has-focus && root.blink-on && !input.has-selection: Rectangle {
+                    x: root.caret.x - 1px;
+                    y: root.caret.y;
+                    width: 2.5px;
+                    height: root.caret.h;
+                    background: Palette.foreground;
+                }
+                // Clicks place the cursor, drags select (with a mouse: a
+                // finger scrolls), double clicks select a word.
+                // A long touch selects the word and shows the menu (the menu
+                // area doesn't see touches the TouchArea takes).
+                TouchArea {
+                    mouse-cursor: MouseCursor.text;
+                    property <int> anchor;
+                    property <bool> selecting;
+                    property <length> press-x;
+                    property <length> press-y;
+                    long-press := Timer {
+                        interval: 500ms;
+                        running: false;
+                        triggered => {
+                            self.running = false;
+                            let w = RichEdit.word(root.lay.gen, RichEdit.hit(root.lay.gen, parent.press-x, parent.press-y));
+                            input.set-selection-offsets(w.start, w.end);
+                            menu-area.show({ x: parent.press-x + scroll.x + scroll.content-x, y: parent.press-y + scroll.y + scroll.content-y });
+                        }
+                    }
+                    pointer-event(ev) => {
+                        if ev.kind != PointerEventKind.move {
+                            long-press.running = false;
+                        }
+                        if ev.kind == PointerEventKind.down && ev.button == PointerEventButton.left {
+                            self.press-x = self.mouse-x;
+                            self.press-y = self.mouse-y;
+                            long-press.running = ev.touch-finger-id != 0;
+                            let composing = root.commit-composing();
+                            let off = RichEdit.hit(root.lay.gen, self.mouse-x, self.mouse-y);
+                            if ev.modifiers.shift {
+                                self.anchor = input.anchor-position-byte-offset;
+                            } else {
+                                self.anchor = off;
+                            }
+                            root.go(off, ev.modifiers.shift);
+                            self.selecting = ev.touch-finger-id == 0;
+                            input.focus();
+                            if composing {
+                                root.after-commit(off);
+                            }
+                        } else if ev.kind == PointerEventKind.up {
+                            self.selecting = false;
+                        }
+                    }
+                    moved => {
+                        if abs(self.mouse-x - self.press-x) > 8px || abs(self.mouse-y - self.press-y) > 8px {
+                            long-press.running = false;
+                        }
+                        if self.pressed && self.selecting {
+                            input.set-selection-offsets(self.anchor, RichEdit.hit(root.lay.gen, self.mouse-x, self.mouse-y));
+                        }
+                    }
+                    double-clicked => {
+                        let w = RichEdit.word(root.lay.gen, RichEdit.hit(root.lay.gen, self.mouse-x, self.mouse-y));
+                        input.set-selection-offsets(w.start, w.end);
+                        self.selecting = false;
+                    }
+                }
+            }
+
+            // Styled: the TextInput is hidden in a 1px clip, transparent. Not
+            // clipped away entirely: that would stop it taking the focus. Its
+            // own cursor sits just outside the clip, so Android shows no
+            // selection handles for it.
+            // On desktop it's kept at the cursor, so input method windows
+            // show there. On Android it's a 2px field left of the view, out of
+            // reach of touches: a long press on it would select a word by its
+            // own (unstyled) layout.
+            Rectangle {
+                x: !root.rich ? 0 : root.android ? -60px : root.caret.x;
+                y: root.rich ? root.caret.y : 0;
+                width: root.rich ? 1px : scroll.visible-width;
+                height: root.rich ? 1px : max(scroll.visible-height, input.preferred-height);
+                clip: root.rich;
+                property <length> cpos-x;
+                property <length> cpos-y;
+
+                input := TextInput {
+                    x: !root.rich ? 0 : root.android ? -1px : -parent.cpos-x;
+                    y: !root.rich ? 0 : root.android ? -1.5px : -4px - parent.cpos-y;
+                    width: !root.rich ? parent.width : root.android ? 2px : 100000px;
+                    height: !root.rich ? parent.height : root.android ? 2px : self.preferred-height + 8px;
+                    single-line: false;
+                    wrap: root.rich ? no-wrap : word-wrap;
+                    font-family: EditorFont.family;
+                    font-size: EditorFont.size;
+                    color: root.rich ? transparent : Palette.foreground;
+                    selection-background-color: root.rich ? transparent : Palette.selection-background;
+                    selection-foreground-color: root.rich ? transparent : Palette.selection-foreground;
+                    // The style's default cursor is a hairline that's hard to see.
+                    text-cursor-width: root.rich ? 0 : 2.5px;
+                    page-height: scroll.visible-height;
+                    accessible-role: none;
+                    edited => {
+                        root.edited(self.text);
+                        root.typed(self.text, self.cursor-position-byte-offset, self.preedit-text);
+                    }
+                    cursor-position-changed(cpos) => {
+                        if root.keep-cursor >= 0 && self.preedit-text == "" && self.cursor-position-byte-offset != root.keep-cursor {
+                            self.set-selection-offsets(root.keep-cursor, root.keep-cursor);
+                            return;
+                        }
+                        parent.cpos-x = cpos.x;
+                        parent.cpos-y = cpos.y;
+                        // Plain: keep the cursor in view (as the standard TextEdit does).
+                        if !root.rich {
+                            root.show(cpos.y, EditorFont.size * 1.6);
+                        }
+                    }
+                    // Styled: moves by rows follow the styled layout.
+                    key-pressed(ev) => {
+                        if !root.rich {
+                            return reject;
+                        }
+                        let apple = Platform.os == OperatingSystemType.macos || Platform.os == OperatingSystemType.ios;
+                        let plain = !ev.modifiers.alt && !ev.modifiers.control && !ev.modifiers.meta;
+                        // Left and right are the TextInput's, but not while a word
+                        // is being composed (see commit-composing).
+                        let composing = self.preedit-text != "";
+                        let mv = ev.text == Key.UpArrow && plain ? 0
+                            : ev.text == Key.DownArrow && plain ? 1
+                            : ev.text == Key.PageUp && plain ? 2
+                            : ev.text == Key.PageDown && plain ? 3
+                            : ev.text == Key.Home && plain ? 4
+                            : ev.text == Key.End && plain ? 5
+                            : apple && ev.text == Key.LeftArrow && ev.modifiers.control && !ev.modifiers.alt ? 4
+                            : apple && ev.text == Key.RightArrow && ev.modifiers.control && !ev.modifiers.alt ? 5
+                            : composing && ev.text == Key.LeftArrow && plain ? 6
+                            : composing && ev.text == Key.RightArrow && plain ? 7
+                            : -1;
+                        if mv < 0 {
+                            return reject;
+                        }
+                        root.commit-composing();
+                        let to = RichEdit.move(root.lay.gen, self.cursor-position-byte-offset, mv, scroll.visible-height);
+                        root.go(to, ev.modifiers.shift);
+                        if composing {
+                            root.after-commit(to);
+                        }
+                        return accept;
                     }
                 }
             }

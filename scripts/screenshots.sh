@@ -21,15 +21,15 @@ demo_notes() {
 
 ## Calendar
 - 09:30-10:00 Standup
-- 13:00-14:00 Lunch with Marta
+- 13:00-14:00 Lunch with **Marta**
 
 ## To do
 - [x] Book train tickets
 - [ ] Review the [[Roadmap]]
-- [ ] Buy coffee beans
+- [ ] Buy *good* coffee beans
 
 - 08:12 Morning run, 5 km along the river.
-- 11:40 Idea: weekly review note every Friday.
+- 11:40 Idea: **weekly review** note every Friday.
 MD
   cat > "$dir/feina/Roadmap.md" <<'MD'
 # Roadmap

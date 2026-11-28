@@ -26,6 +26,8 @@ rrule = "0.14.0"
 serde_yaml = "0.9"
 chrono-tz = { version = "0.10", default-features = false, features = ["std"] }
 whisper-rs = { version = "0.16", features = ["log_backend"] }
+unicode-segmentation = "1"
+unicode-width = "0.2"
 image = { version = "0.25", default-features = false, features = ["jpeg", "png", "webp", "gif"] }
 
 [target.'cfg(not(target_os = "android"))'.dependencies]

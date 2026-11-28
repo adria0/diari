@@ -9,6 +9,7 @@ mod android;
 mod macos;
 pub mod markdown;
 pub mod notes;
+pub mod richedit;
 pub mod sync;
 pub mod voice;
 pub mod workspaces;
@@ -1771,6 +1772,7 @@ pub fn run(
             }
         })
     });
+    richedit::install(&ui);
     ui.on_text_edited(|_| with_app(|a| a.mark_edited()));
     ui.on_preview_toggled(|| {
         with_app(|a| {
