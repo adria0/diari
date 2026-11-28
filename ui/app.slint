@@ -925,6 +925,8 @@ component NoteEditor inherits Rectangle {
                 color: Palette.foreground;
                 selection-background-color: Palette.selection-background;
                 selection-foreground-color: Palette.selection-foreground;
+                // The style's default cursor is a hairline that's hard to see.
+                text-cursor-width: 2.5px;
                 page-height: scroll.visible-height;
                 accessible-role: none;
                 edited => {
